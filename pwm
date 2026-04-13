@@ -6,35 +6,40 @@ sudo make install
 
 #include <iostream>
 #include <pigpio.h>
-#include <unistd.h> // Används för att pausa koden (sleep)
+#include <unistd.h>
 
 using namespace std;
 
-#define MOTOR_PWM 18 // Den GPIO-pinne vi kopplat H-bryggan till
+#define MOTOR_PWM 18
+#define MOTOR_HIGH 14 // Riktning framåt
+#define MOTOR_LOW 15  // Riktning bakåt
 
 int main() {
-    // 1. Starta kopplingen till GPIO-pinnarna
     if (gpioInitialise() < 0) {
-        cerr << "Kunde inte starta pigpio. Körde du med sudo?" << endl;
+        cerr << "Kunde inte starta pigpio." << endl;
         return -1;
     }
 
-    // 2. Berätta för datorn att pinne 18 ska skicka ut signal
+    // Aktivera pinnarna
     gpioSetMode(MOTOR_PWM, PI_OUTPUT);
+    gpioSetMode(MOTOR_HIGH, PI_OUTPUT);
+    gpioSetMode(MOTOR_LOW, PI_OUTPUT);
 
-    // 3. Starta motorn! (128 är halv hastighet, 255 är max)
-    cout << "Startar motorn på halv fart..." << endl;
+    // Sätt riktningen till FRAMÅT (HIGH = på, LOW = av)
+    gpioWrite(MOTOR_HIGH, 1);
+    gpioWrite(MOTOR_LOW, 0);
+
+    cout << "Startar motorn på halv fart framåt..." << endl;
     gpioPWM(MOTOR_PWM, 128); 
 
-    // 4. Låt den snurra i 2 sekunder
     sleep(2); 
 
-    // 5. Stanna motorn
     cout << "Stannar motorn." << endl;
     gpioPWM(MOTOR_PWM, 0);
-
-    // Stäng av pigpio säkert
-    gpioTerminate();
     
+    // Stäng av riktningssignalerna
+    gpioWrite(MOTOR_HIGH, 0);
+
+    gpioTerminate();
     return 0;
 }
