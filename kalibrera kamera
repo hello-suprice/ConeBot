@@ -80,3 +80,21 @@ int main() {
 [ERROR:0@18.385] global obsensor_uvc_stream_channel.cpp:158 getStreamChannelGroup Camera index out of range
 Kunde inte hitta kameran!
 
+
+(test_kamera:2462): GStreamer-CRITICAL **: 14:47:18.517: gst_caps_get_structure: assertion 'GST_IS_CAPS (caps)' failed
+
+(test_kamera:2462): GStreamer-CRITICAL **: 14:47:18.519: gst_structure_get_int: assertion 'structure != NULL' failed
+[ WARN:0@30.396] global cap_gstreamer.cpp:1714 open OpenCV | GStreamer warning: cannot query video width/height
+
+(test_kamera:2462): GStreamer-CRITICAL **: 14:47:18.524: gst_structure_get_fraction: assertion 'structure != NULL' failed
+[ WARN:0@30.399] global cap_gstreamer.cpp:1722 open OpenCV | GStreamer warning: cannot query video fps
+[ WARN:0@30.400] global cap_gstreamer.cpp:1777 open OpenCV | GStreamer warning: Cannot query video position: status=0, value=-1, duration=-1
+Kameran startad. Tryck på tangenten 'q' i videofönstret för att avsluta.
+q
+
+(test_kamera:2462): GStreamer-CRITICAL **: 14:48:23.526: gst_sample_get_caps: assertion 'GST_IS_SAMPLE (sample)' failed
+[ERROR:0@95.401] global cap_gstreamer.cpp:934 retrieveVideoFrame GStreamer: gst_sample_get_caps() returns NULL
+hmm@raspberrypi:~ $ q
+bash: q: command not found
+hmm@raspberrypi:~ $ 
+
