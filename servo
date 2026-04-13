@@ -1,0 +1,40 @@
+#include <iostream>
+#include <pigpio.h>
+#include <unistd.h>
+
+using namespace std;
+
+#define SERVO_PWM 13 // Pinnen för servots styrsignal
+
+int main() {
+    if (gpioInitialise() < 0) {
+        cerr << "Kunde inte starta pigpio. Körde du med sudo?" << endl;
+        return -1;
+    }
+
+    // För servon använder pigpio funktionen gpioServo().
+    // Värdet 1500 är oftast exakt i mitten (rakt fram).
+    // Värden mellan ca 1000 och 2000 svänger max åt vänster/höger.
+
+    cout << "Ställer hjulen rakt fram (1500)..." << endl;
+    gpioServo(SERVO_PWM, 1500);
+    sleep(2);
+
+    cout << "Svänger åt ena hållet (1000)..." << endl;
+    gpioServo(SERVO_PWM, 1000);
+    sleep(2);
+
+    cout << "Svänger åt andra hållet (2000)..." << endl;
+    gpioServo(SERVO_PWM, 2000);
+    sleep(2);
+
+    cout << "Tillbaka till rakt fram (1500)..." << endl;
+    gpioServo(SERVO_PWM, 1500);
+    sleep(1);
+
+    // Stäng av signalen till servot (0 betyder av)
+    gpioServo(SERVO_PWM, 0);
+    gpioTerminate();
+    
+    return 0;
+}
