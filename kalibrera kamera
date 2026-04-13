@@ -1,0 +1,74 @@
+#include <iostream>
+#include <opencv2/opencv.hpp>
+
+using namespace std;
+using namespace cv;
+
+int main() {
+    // 1. Starta kameran
+    // "0" fungerar ofta för standard USB-kameror och vissa Pi-kameror. 
+    // Fungerar det inte, kan vi byta till libcamera-pipelinen från Robocar.
+    VideoCapture cap(0); 
+    
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte hitta kameran!" << endl;
+        return -1;
+    }
+
+    cout << "Kameran startad. Tryck på tangenten 'q' i videofönstret för att avsluta." << endl;
+
+    // Matriser för att spara våra bilder
+    Mat frame, hsv, mask_yellow, mask_blue;
+
+    while (true) {
+        cap >> frame; // Läs in en ny bildruta
+        if (frame.empty()) break;
+
+        // 2. Konvertera från RGB till HSV [1]
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        // 3. Definiera färggränser för GUL (Hue: ca 20-35)
+        Scalar lower_yellow(20, 100, 100);
+        Scalar upper_yellow(35, 255, 255);
+
+        // 4. Definiera färggränser för BLÅ (Hue: ca 100-130)
+        Scalar lower_blue(100, 150, 50);
+        Scalar upper_blue(130, 255, 255);
+
+        // Skapa svartvita masker där bara rätt färg är vit
+        inRange(hsv, lower_yellow, upper_yellow, mask_yellow);
+        inRange(hsv, lower_blue, upper_blue, mask_blue);
+
+        // 5. Hitta konturer och rita rektanglar (Bounding Boxes) för GUL [3]
+        vector<vector<Point>> contours_yellow;
+        findContours(mask_yellow, contours_yellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        for (const auto& contour : contours_yellow) {
+            if (contourArea(contour) > 500) { // Filtrerar bort smått brus [4]
+                Rect bbox = boundingRect(contour);
+                rectangle(frame, bbox, Scalar(0, 255, 255), 2); // Rita gul rektangel
+                putText(frame, "GUL KON", Point(bbox.x, bbox.y - 10), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 255, 255), 2);
+            }
+        }
+
+        // 6. Hitta konturer och rita rektanglar för BLÅ [3]
+        vector<vector<Point>> contours_blue;
+        findContours(mask_blue, contours_blue, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        for (const auto& contour : contours_blue) {
+            if (contourArea(contour) > 500) {
+                Rect bbox = boundingRect(contour);
+                rectangle(frame, bbox, Scalar(255, 0, 0), 2); // Rita blå rektangel
+                putText(frame, "BLA KON", Point(bbox.x, bbox.y - 10), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 0, 0), 2);
+            }
+        }
+
+        // 7. Visa resultatet på skärmen
+        imshow("ConeBot Kamera Test", frame);
+
+        // Avsluta om man trycker på 'q'
+        if (waitKey(30) == 'q') break;
+    }
+
+    cap.release();
+    destroyAllWindows();
+    return 0;
+}
