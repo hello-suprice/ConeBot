@@ -1,0 +1,47 @@
+#include <iostream>
+#include <pigpio.h>
+
+using namespace std;
+
+#define SERVO_PWM 13
+
+int main() {
+    if (gpioInitialise() < 0) {
+        cerr << "Kunde inte starta pigpio." << endl;
+        return -1;
+    }
+
+    int nuvarande_vinkel = 1500;
+    gpioServo(SERVO_PWM, nuvarande_vinkel);
+    cout << "Servot star nu i neutrallage (1500)." << endl;
+    cout << "Testa att oka/minska med 50 i taget." << endl;
+
+    while (true) {
+        cout << "\nSkriv in ett nytt PWM-varde (eller 0 for att avsluta): ";
+        int input_pwm;
+        cin >> input_pwm;
+
+        if (input_pwm == 0) {
+            cout << "Avslutar kalibrering..." << endl;
+            break;
+        }
+
+        // En säkerhetsspärr så du inte råkar skriva in något extremt
+        if (input_pwm < 1000 || input_pwm > 2000) {
+            cout << "VARNING: Värdet är utanför säkra gränser (1000-2000)!" << endl;
+            continue;
+        }
+
+        nuvarande_vinkel = input_pwm;
+        gpioServo(SERVO_PWM, nuvarande_vinkel);
+        cout << "---> Hjulen svangda till: " << nuvarande_vinkel << endl;
+    }
+
+    // Ställ hjulen rakt och stäng av säkert
+    gpioServo(SERVO_PWM, 1500);
+    gpioDelay(500000); // Vänta en halv sekund
+    gpioServo(SERVO_PWM, 0); 
+    gpioTerminate();
+    
+    return 0;
+}
