@@ -98,3 +98,7 @@ hmm@raspberrypi:~ $ q
 bash: q: command not found
 hmm@raspberrypi:~ $ 
 
+(test_kamera:2573): GStreamer-CRITICAL **: 14:53:57.661: gst_sample_get_caps: assertion 'GST_IS_SAMPLE (sample)' failed
+[ERROR:0@95.418] global cap_gstreamer.cpp:934 retrieveVideoFrame GStreamer: gst_sample_get_caps() returns NULL
+hmm@raspberrypi:~ $ 
+
