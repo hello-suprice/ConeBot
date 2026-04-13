@@ -97,6 +97,21 @@ hmm@raspberrypi:~ $
 
 
 
+hmm@raspberrypi:~ $ ./test_hsv
+[2:28:05.853777193] [11950]  INFO Camera camera_manager.cpp:340 libcamera v0.7.0+rpt20260205
+[2:28:06.653156514] [11955]  INFO IPAProxy ipa_proxy.cpp:180 Using tuning file /usr/share/libcamera/ipa/rpi/vc4/imx708.json
+[2:28:06.696128772] [11955]  INFO Camera camera_manager.cpp:223 Adding camera '/base/soc/i2c0mux/i2c@1/imx708@1a' for pipeline handler rpi/vc4
+[2:28:06.696305960] [11955]  INFO RPI vc4.cpp:445 Registered camera /base/soc/i2c0mux/i2c@1/imx708@1a to Unicam device /dev/media0 and ISP device /dev/media1
+[2:28:06.730384318] [11958]  INFO Camera camera.cpp:1215 configuring streams: (0) 1280x1080-NV21/Rec709
+[2:28:06.731637494] [11955]  INFO RPI vc4.cpp:620 Sensor: /base/soc/i2c0mux/i2c@1/imx708@1a - Selected sensor format: 2304x1296-SBGGR10_1X10/RAW - Selected unicam format: 2304x1296-pBAA/RAW
+[ WARN:0@2.202] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module libcamerasrc0 reported: Internal data stream error.
+[ WARN:0@2.226] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@2.226] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+[ WARN:0@2.227] global cap.cpp:204 open VIDEOIO(GSTREAMER): backend is generally available but can't be used to capture by name
+Kunde inte hitta kameran!
+hmm@raspberrypi:~ $ 
+
+
 -----------------------
 [ WARN:0@17.251] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Cannot identify device '/dev/video0'.
 [ WARN:0@17.251] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
