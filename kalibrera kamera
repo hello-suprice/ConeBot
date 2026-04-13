@@ -79,7 +79,25 @@ int main() {
 }
 
 ----------------------------------------------
+hmm@raspberrypi:~ $ ./test_hsv
 
+(test_hsv:11485): GStreamer-CRITICAL **: 17:03:57.640: gst_caps_get_structure: assertion 'GST_IS_CAPS (caps)' failed
+
+(test_hsv:11485): GStreamer-CRITICAL **: 17:03:57.641: gst_structure_get_int: assertion 'structure != NULL' failed
+[ WARN:0@41.932] global cap_gstreamer.cpp:1714 open OpenCV | GStreamer warning: cannot query video width/height
+
+(test_hsv:11485): GStreamer-CRITICAL **: 17:03:57.642: gst_structure_get_fraction: assertion 'structure != NULL' failed
+[ WARN:0@41.933] global cap_gstreamer.cpp:1722 open OpenCV | GStreamer warning: cannot query video fps
+[ WARN:0@41.933] global cap_gstreamer.cpp:1777 open OpenCV | GStreamer warning: Cannot query video position: status=0, value=-1, duration=-1
+Kameran startad. Leta efter koner... Tryck 'q' i videofönstret för att avsluta.
+
+(test_hsv:11485): GStreamer-CRITICAL **: 17:05:02.643: gst_sample_get_caps: assertion 'GST_IS_SAMPLE (sample)' failed
+[ERROR:0@106.934] global cap_gstreamer.cpp:934 retrieveVideoFrame GStreamer: gst_sample_get_caps() returns NULL
+hmm@raspberrypi:~ $ 
+
+
+
+-----------------------
 [ WARN:0@17.251] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Cannot identify device '/dev/video0'.
 [ WARN:0@17.251] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
 [ WARN:0@17.252] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
