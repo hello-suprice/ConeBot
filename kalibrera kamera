@@ -5,26 +5,28 @@ using namespace std;
 using namespace cv;
 
 int main() {
-    // 1. Starta kameran
-    // "0" fungerar ofta för standard USB-kameror och vissa Pi-kameror. 
-    // Fungerar det inte, kan vi byta till libcamera-pipelinen från Robocar.
-    VideoCapture cap(0); 
+    // 1. Starta kameran med rätt GStreamer-pipeline för din Camera Module 3
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=480 ! videoconvert ! appsink";
+    VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
     
     if (!cap.isOpened()) {
         cerr << "Kunde inte hitta kameran!" << endl;
         return -1;
     }
 
-    cout << "Kameran startad. Tryck på tangenten 'q' i videofönstret för att avsluta." << endl;
+    cout << "Kameran startad. Leta efter koner... Tryck 'q' i videofönstret för att avsluta." << endl;
 
-    // Matriser för att spara våra bilder
+    // Matriser för att spara bilddata
     Mat frame, hsv, mask_yellow, mask_blue;
 
     while (true) {
         cap >> frame; // Läs in en ny bildruta
         if (frame.empty()) break;
 
-        // 2. Konvertera från RGB till HSV [1]
+        // Vänd bilden rätt eftersom kameran är monterad upp och ner
+        flip(frame, frame, -1); 
+
+        // 2. Konvertera bilden från BGR (OpenCVs standard) till HSV
         cvtColor(frame, hsv, COLOR_BGR2HSV);
 
         // 3. Definiera färggränser för GUL (Hue: ca 20-35)
@@ -39,22 +41,22 @@ int main() {
         inRange(hsv, lower_yellow, upper_yellow, mask_yellow);
         inRange(hsv, lower_blue, upper_blue, mask_blue);
 
-        // 5. Hitta konturer och rita rektanglar (Bounding Boxes) för GUL [3]
+        // 5. Hitta konturer och rita rektanglar (Bounding Boxes) för GUL
         vector<vector<Point>> contours_yellow;
         findContours(mask_yellow, contours_yellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
         for (const auto& contour : contours_yellow) {
-            if (contourArea(contour) > 500) { // Filtrerar bort smått brus [4]
+            if (contourArea(contour) > 500) { // Filtrerar bort smått brus
                 Rect bbox = boundingRect(contour);
                 rectangle(frame, bbox, Scalar(0, 255, 255), 2); // Rita gul rektangel
                 putText(frame, "GUL KON", Point(bbox.x, bbox.y - 10), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 255, 255), 2);
             }
         }
 
-        // 6. Hitta konturer och rita rektanglar för BLÅ [3]
+        // 6. Hitta konturer och rita rektanglar för BLÅ
         vector<vector<Point>> contours_blue;
         findContours(mask_blue, contours_blue, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
         for (const auto& contour : contours_blue) {
-            if (contourArea(contour) > 500) {
+            if (contourArea(contour) > 500) { // Filtrerar bort smått brus
                 Rect bbox = boundingRect(contour);
                 rectangle(frame, bbox, Scalar(255, 0, 0), 2); // Rita blå rektangel
                 putText(frame, "BLA KON", Point(bbox.x, bbox.y - 10), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255, 0, 0), 2);
@@ -62,7 +64,10 @@ int main() {
         }
 
         // 7. Visa resultatet på skärmen
-        imshow("ConeBot Kamera Test", frame);
+        imshow("ConeBot HSV Test", frame);
+        // Visa även maskerna om du vill felsöka exakt vad datorn ser! (Valfritt)
+        // imshow("Gul Mask", mask_yellow);
+        // imshow("Bla Mask", mask_blue);
 
         // Avsluta om man trycker på 'q'
         if (waitKey(30) == 'q') break;
@@ -72,6 +77,8 @@ int main() {
     destroyAllWindows();
     return 0;
 }
+
+----------------------------------------------
 
 [ WARN:0@17.251] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Cannot identify device '/dev/video0'.
 [ WARN:0@17.251] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
