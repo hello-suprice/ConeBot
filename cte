@@ -1,0 +1,105 @@
+#include <iostream>
+#include <opencv2/opencv.hpp>
+
+using namespace std;
+using namespace cv;
+
+// En smart hjälpfunktion som letar igenom alla hittade färgklumpar 
+// och returnerar rektangeln för den absolut STÖRSTA konen.
+Rect getLargestBoundingBox(const vector<vector<Point>>& contours) {
+    double maxArea = 0;
+    Rect largestBbox;
+    for (const auto& contour : contours) {
+        double area = contourArea(contour);
+        if (area > 500 && area > maxArea) {
+            maxArea = area;
+            largestBbox = boundingRect(contour);
+        }
+    }
+    return largestBbox;
+}
+
+int main() {
+    // Starta kameran med full obeskuren upplösning (640x360)
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=360, framerate=30/1 ! videoconvert ! appsink drop=true";
+    VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
+    
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte hitta kameran!" << endl;
+        return -1;
+    }
+
+    cout << "Kameran startad. Tryck 'q' i videofönstret för att avsluta." << endl;
+
+    Mat frame, hsv, mask_yellow, mask_blue;
+
+    // Kamerans absoluta mittpunkt i X-led (Bredden 640 delat på 2)
+    const int CAMERA_CENTER_X = 320; 
+
+    while (true) {
+        cap >> frame;
+        if (frame.empty()) break;
+
+        // Vänd bilden rätt
+        flip(frame, frame, -1); 
+
+        // Konvertera till HSV
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        // Färggränser för GUL och BLÅ
+        Scalar lower_yellow(20, 100, 100);
+        Scalar upper_yellow(35, 255, 255);
+        Scalar lower_blue(100, 150, 50);
+        Scalar upper_blue(130, 255, 255);
+
+        inRange(hsv, lower_yellow, upper_yellow, mask_yellow);
+        inRange(hsv, lower_blue, upper_blue, mask_blue);
+
+        vector<vector<Point>> contours_yellow, contours_blue;
+        findContours(mask_yellow, contours_yellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(mask_blue, contours_blue, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        // 1. Hitta den största gula respektive blå konen i bilden
+        Rect bbox_yellow = getLargestBoundingBox(contours_yellow);
+        Rect bbox_blue = getLargestBoundingBox(contours_blue);
+
+        // 2. Om datorn ser BÅDE en gul och en blå kon, rita ut linjerna!
+        if (bbox_yellow.area() > 0 && bbox_blue.area() > 0) {
+            
+            // Rita rektanglarna runt konerna
+            rectangle(frame, bbox_yellow, Scalar(0, 255, 255), 2);
+            rectangle(frame, bbox_blue, Scalar(255, 0, 0), 2);
+
+            // Räkna ut exakt mittpunkt (X, Y) inuti den gula respektive blå rektangeln
+            Point center_yellow(bbox_yellow.x + bbox_yellow.width / 2, bbox_yellow.y + bbox_yellow.height / 2);
+            Point center_blue(bbox_blue.x + bbox_blue.width / 2, bbox_blue.y + bbox_blue.height / 2);
+
+            // Dra en grön linje mellan konerna
+            line(frame, center_yellow, center_blue, Scalar(0, 255, 0), 2);
+
+            // 3. Räkna ut LOOK-AHEAD-PUNKTEN (pricken mitt emellan konerna)
+            Point midpoint((center_yellow.x + center_blue.x) / 2, (center_yellow.y + center_blue.y) / 2);
+            circle(frame, midpoint, 6, Scalar(0, 0, 255), -1); // Rita en röd, ifylld prick i mitten
+
+            // 4. BERÄKNA CROSS-TRACK ERROR (CTE)
+            // Felet är avståndet i sidled från kamerans absoluta mitt till Look-ahead-punkten
+            int cte = midpoint.x - CAMERA_CENTER_X;
+
+            // Dra en röd linje från botten av skärmen (bilens nos) upp till Look-ahead-punkten för att visa CTE visuellt
+            Point camera_bottom_center(CAMERA_CENTER_X, 360);
+            line(frame, camera_bottom_center, midpoint, Scalar(0, 0, 255), 2);
+
+            // Skriv ut CTE-värdet i text uppe i hörnet
+            string cte_text = "CTE (Styrfel): " + to_string(cte) + " pixlar";
+            putText(frame, cte_text, Point(10, 30), FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 0, 255), 2);
+        }
+
+        imshow("ConeBot Visuell CTE", frame);
+
+        if (waitKey(30) == 'q') break;
+    }
+
+    cap.release();
+    destroyAllWindows();
+    return 0;
+}
