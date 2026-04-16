@@ -153,3 +153,27 @@ int main() {
     gpioTerminate();
     return 0;
 }
+
+
+
+
+
+hmm@raspberrypi:~ $ g++ -o test5_hsv test5_hsv.cpp $(pkg-config --cflags --libs opencv4) -lpigpio -lrt
+test5_hsv.cpp: In function ‘int main()’:
+test5_hsv.cpp:119:75: error: expected identifier before numeric constant
+  119 |             current_servo_pwm = max(1000, min(2000, current_servo_pwm)); [6]
+      |                                                                           ^
+test5_hsv.cpp: In lambda function:
+test5_hsv.cpp:122:13: error: expected ‘{’ before ‘gpioServo’
+  122 |             gpioServo(SERVO_PWM, current_servo_pwm);
+      |             ^~~~~~~~~
+test5_hsv.cpp: In function ‘int main()’:
+test5_hsv.cpp:119:77: error: expected ‘;’ before ‘gpioServo’
+  119 |             current_servo_pwm = max(1000, min(2000, current_servo_pwm)); [6]
+      |                                                                             ^
+      |                                                                             ;
+......
+  122 |             gpioServo(SERVO_PWM, current_servo_pwm);
+      |             ~~~~~~~~~                                                        
+hmm@raspberrypi:~ $ 
+
