@@ -1,18 +1,16 @@
 #include <iostream>
 #include <opencv2/opencv.hpp>
-#include <pigpio.h>      // Bibliotek för att styra GPIO-stift
-#include <chrono>        // Bibliotek för att mäta tid till PI-regulatorn
+#include <pigpio.h>
+#include <chrono>
 
 using namespace std;
 using namespace cv;
 
-// --- GPIO-STIFT (Baserat på Robocar-standarden) ---
-const int MOTOR_PWM = 18;  // PWM till H-bryggan (Hastighet)
-const int MOTOR_IN1 = 14;  // Riktning framåt
-const int MOTOR_IN2 = 15;  // Riktning bakåt
-const int SERVO_PWM = 13;  // PWM till Styrservot
+const int MOTOR_PWM = 18;  
+const int MOTOR_IN1 = 14;  
+const int MOTOR_IN2 = 15;  
+const int SERVO_PWM = 13;  
 
-// Hjälpfunktion för att hitta den STÖRSTA konen (utan avancerad överlappnings-koll just nu)
 Rect getLargestBoundingBox(const vector<vector<Point>>& contours) {
     double maxArea = 0;
     Rect largestBbox;
@@ -27,7 +25,6 @@ Rect getLargestBoundingBox(const vector<vector<Point>>& contours) {
 }
 
 int main() {
-    // 1. STARTA GPIO OCH MOTORER
     if (gpioInitialise() < 0) {
         cerr << "Kunde inte starta pigpio! Kör du med sudo?" << endl;
         return -1;
@@ -38,11 +35,11 @@ int main() {
     gpioSetMode(MOTOR_IN2, PI_OUTPUT);
     gpioSetMode(SERVO_PWM, PI_OUTPUT);
 
-    // Sätt motorn till att rulla framåt
-    gpioWrite(MOTOR_IN1, 1);
+    // Stänger av framdrivningen helt för att enbart testa servot!
+    gpioWrite(MOTOR_IN1, 0);
     gpioWrite(MOTOR_IN2, 0);
+    gpioPWM(MOTOR_PWM, 0); 
 
-    // 2. STARTA KAMERAN
     string pipeline = "libcamerasrc ! video/x-raw, width=640, height=360, framerate=30/1 ! videoconvert ! appsink drop=true";
     VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
     
@@ -51,20 +48,19 @@ int main() {
         return -1;
     }
 
-    cout << "Startar autonom körning... Tryck 'q' för att stanna." << endl;
+    cout << "Servotest startat. DC-motor avstängd. Tryck 'q' för att avsluta." << endl;
 
     Mat frame, hsv, mask_yellow, mask_blue;
     const int CAMERA_CENTER_X = 320; 
 
     // --- PI-REGULATORNS VARIABLER ---
-    double Kp = 0.8;  // Proportionell (Justera detta värde sen!)
-    double Ki = 0.0;  // Integrerande (Vi börjar på 0 för enkelhetens skull)
+    double Kp = 0.8;  
+    double Ki = 0.0;  
     double integral = 0;
     
-    // Standard servomitten är ofta 1500 mikrosekunder
-    int base_servo_pwm = 1500; 
+    // DINA NYA SERVO-GRÄNSER
+    int base_servo_pwm = 2150; // Mittenläget för ditt servo
     int prev_servo_pwm = base_servo_pwm; 
-    int motor_speed = 100; // Grundhastighet (0-255)
 
     auto prevTime = chrono::high_resolution_clock::now();
 
@@ -75,7 +71,6 @@ int main() {
         flip(frame, frame, -1); 
         cvtColor(frame, hsv, COLOR_BGR2HSV);
 
-        // Färggränser
         Scalar lower_yellow(20, 100, 100);
         Scalar upper_yellow(35, 255, 255);
         Scalar lower_blue(100, 150, 50);
@@ -91,17 +86,14 @@ int main() {
         Rect bbox_yellow = getLargestBoundingBox(contours_yellow);
         Rect bbox_blue = getLargestBoundingBox(contours_blue);
 
-        // FLÖDESSCHEMA: Ser vi koner?
         if (bbox_yellow.area() > 0 && bbox_blue.area() > 0) {
             
-            // Räkna ut Look-ahead och CTE
             Point center_yellow(bbox_yellow.x + bbox_yellow.width / 2, bbox_yellow.y + bbox_yellow.height / 2);
             Point center_blue(bbox_blue.x + bbox_blue.width / 2, bbox_blue.y + bbox_blue.height / 2);
             Point midpoint((center_yellow.x + center_blue.x) / 2, (center_yellow.y + center_blue.y) / 2);
             
             double cte = midpoint.x - CAMERA_CENTER_X;
 
-            // --- PI REGULERING ---
             auto now = chrono::high_resolution_clock::now();
             chrono::duration<double> elapsed = now - prevTime;
             double dt = elapsed.count();
@@ -110,70 +102,42 @@ int main() {
             integral += cte * dt;
             double output = (Kp * cte) + (Ki * integral);
 
-            // --- STYRSIGNAL TILL SERVO ---
-            // Vi drar bort output från mittenläget. (Beroende på hur ditt servo sitter monterat 
-            // kanske vi behöver byta till plus istället för minus här).
+            // Beräkna nya PWM-värdet
             int current_servo_pwm = base_servo_pwm - static_cast<int>(output);
 
-            // Begränsa så vi inte spränger servot (mekaniskt max/min)
-            current_servo_pwm = max(1000, min(2000, current_servo_pwm)); [6]
+            // BEGRÄNSA TILL DINA MAX/MIN (1900 - 2400)
+            current_servo_pwm = max(1900, min(2400, current_servo_pwm));
 
-            // Skicka styrsignalen till servot och starta DC-motorn
             gpioServo(SERVO_PWM, current_servo_pwm);
-            gpioPWM(MOTOR_PWM, motor_speed); 
-
-            // Spara värdet till nästa loop
             prev_servo_pwm = current_servo_pwm;
 
-            // Rita visuellt för skärmen
+            // Rita ut linjer för felsökning
+            rectangle(frame, bbox_yellow, Scalar(0, 255, 255), 2);
+            rectangle(frame, bbox_blue, Scalar(255, 0, 0), 2);
+            line(frame, center_yellow, center_blue, Scalar(0, 255, 0), 2);
+            Point camera_bottom_center(CAMERA_CENTER_X, 360);
+            line(frame, camera_bottom_center, midpoint, Scalar(0, 0, 255), 2);
             circle(frame, midpoint, 6, Scalar(0, 0, 255), -1);
-            putText(frame, "CTE: " + to_string((int)cte), Point(10, 30), FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 0, 255), 2);
+            putText(frame, "CTE: " + to_string((int)cte) + " PWM: " + to_string(current_servo_pwm), Point(10, 30), FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 0, 255), 2);
         } 
         else {
-            // FLÖDESSCHEMA: Nej, vi ser inga koner -> Behåll föregående värden
-            gpioServo(SERVO_PWM, prev_servo_pwm);
-            gpioPWM(MOTOR_PWM, motor_speed);
-            putText(frame, "INGA KONER - HALLER KURSEN", Point(10, 30), FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 255), 2);
+            // Om inga koner ses, centrera servot på din specificerade mittpunkt
+            gpioServo(SERVO_PWM, 2150);
+            putText(frame, "INGA KONER - CENTRERAR HJULEN", Point(10, 30), FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 255, 255), 2);
         }
 
-        imshow("ConeBot Drive Test", frame);
+        imshow("ConeBot Servo Test", frame);
 
-        // Avbryt och STANNA BILEN med 'q'
         if (waitKey(30) == 'q') {
-            gpioPWM(MOTOR_PWM, 0); // Nödstopp motor
-            gpioServo(SERVO_PWM, 1500); // Centrera hjulen
+            gpioServo(SERVO_PWM, 2150); // Centrera innan avslut
             break;
         }
     }
 
-    // Stäng ner allt snyggt när programmet avslutas
     cap.release();
     destroyAllWindows();
     gpioPWM(MOTOR_PWM, 0);
     gpioTerminate();
     return 0;
 }
-
-
-
-
-
-hmm@raspberrypi:~ $ g++ -o test5_hsv test5_hsv.cpp $(pkg-config --cflags --libs opencv4) -lpigpio -lrt
-test5_hsv.cpp: In function ‘int main()’:
-test5_hsv.cpp:119:75: error: expected identifier before numeric constant
-  119 |             current_servo_pwm = max(1000, min(2000, current_servo_pwm)); [6]
-      |                                                                           ^
-test5_hsv.cpp: In lambda function:
-test5_hsv.cpp:122:13: error: expected ‘{’ before ‘gpioServo’
-  122 |             gpioServo(SERVO_PWM, current_servo_pwm);
-      |             ^~~~~~~~~
-test5_hsv.cpp: In function ‘int main()’:
-test5_hsv.cpp:119:77: error: expected ‘;’ before ‘gpioServo’
-  119 |             current_servo_pwm = max(1000, min(2000, current_servo_pwm)); [6]
-      |                                                                             ^
-      |                                                                             ;
-......
-  122 |             gpioServo(SERVO_PWM, current_servo_pwm);
-      |             ~~~~~~~~~                                                        
-hmm@raspberrypi:~ $ 
 
