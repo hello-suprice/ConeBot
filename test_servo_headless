@@ -1,0 +1,150 @@
+#include <iostream>
+#include <opencv2/opencv.hpp>
+#include <pigpio.h>
+#include <chrono>
+#include <csignal>
+
+using namespace std;
+using namespace cv;
+
+// --- GPIO-STIFT ---
+const int MOTOR_PWM = 18;  
+const int MOTOR_IN1 = 14;  
+const int MOTOR_IN2 = 15;  
+const int SERVO_PWM = 13;  
+
+bool keepRunning = true;
+
+// Signalhanterare för att kunna nödstoppa koden med Ctrl+C
+void sigHandler(int signum) {
+    cout << "\nAvbryter... Centrerar hjulen och stänger ner!" << endl;
+    keepRunning = false;
+}
+
+// Snabb funktion för att hitta den största konen
+Rect getLargestBoundingBox(const vector<vector<Point>>& contours) {
+    double maxArea = 0;
+    Rect largestBbox;
+    for (const auto& contour : contours) {
+        double area = contourArea(contour);
+        if (area > 500 && area > maxArea) {
+            maxArea = area;
+            largestBbox = boundingRect(contour);
+        }
+    }
+    return largestBbox;
+}
+
+int main() {
+    // Fånga Ctrl+C (SIGINT)
+    signal(SIGINT, sigHandler);
+
+    if (gpioInitialise() < 0) {
+        cerr << "Kunde inte starta pigpio! Kör du med sudo?" << endl;
+        return -1;
+    }
+
+    gpioSetMode(MOTOR_PWM, PI_OUTPUT);
+    gpioSetMode(MOTOR_IN1, PI_OUTPUT);
+    gpioSetMode(MOTOR_IN2, PI_OUTPUT);
+    gpioSetMode(SERVO_PWM, PI_OUTPUT);
+
+    // STÄNG AV DC-MOTORN HELT FÖR DETTA TEST
+    gpioWrite(MOTOR_IN1, 0);
+    gpioWrite(MOTOR_IN2, 0);
+    gpioPWM(MOTOR_PWM, 0); 
+
+    // Starta kameran (Headless, inget videofönster ritas ut)
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=360, framerate=30/1 ! videoconvert ! appsink drop=true";
+    VideoCapture cap(pipeline, cv::CAP_GSTREAMER);
+    
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte hitta kameran!" << endl;
+        gpioTerminate();
+        return -1;
+    }
+
+    cout << "--- HEADLESS SERVO TEST STARTAT ---" << endl;
+    cout << "DC-motorn är inaktiverad. Rör konerna framför kameran." << endl;
+    cout << "Tryck Ctrl+C i terminalen för att avsluta." << endl;
+
+    Mat frame, hsv, mask_yellow, mask_blue;
+    const int CAMERA_CENTER_X = 320; 
+
+    // --- PID-VARIABLER ---
+    double Kp = 0.8;  
+    double Ki = 0.0;  
+    double integral = 0;
+    
+    int base_servo_pwm = 2150; 
+    int prev_servo_pwm = base_servo_pwm; 
+
+    auto prevTime = chrono::high_resolution_clock::now();
+
+    while (keepRunning) {
+        cap >> frame;
+        if (frame.empty()) break;
+
+        flip(frame, frame, -1); 
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        // Färggränser (Justera dessa om rummet har ändrat ljus sedan sist)
+        Scalar lower_yellow(20, 100, 100);
+        Scalar upper_yellow(35, 255, 255);
+        Scalar lower_blue(100, 150, 50);
+        Scalar upper_blue(130, 255, 255);
+
+        inRange(hsv, lower_yellow, upper_yellow, mask_yellow);
+        inRange(hsv, lower_blue, upper_blue, mask_blue);
+
+        vector<vector<Point>> contours_yellow, contours_blue;
+        findContours(mask_yellow, contours_yellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(mask_blue, contours_blue, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        Rect bbox_yellow = getLargestBoundingBox(contours_yellow);
+        Rect bbox_blue = getLargestBoundingBox(contours_blue);
+
+        // Ser vi ett komplett par koner?
+        if (bbox_yellow.area() > 0 && bbox_blue.area() > 0) {
+            
+            Point center_yellow(bbox_yellow.x + bbox_yellow.width / 2, bbox_yellow.y + bbox_yellow.height / 2);
+            Point center_blue(bbox_blue.x + bbox_blue.width / 2, bbox_blue.y + bbox_blue.height / 2);
+            Point midpoint((center_yellow.x + center_blue.x) / 2, (center_yellow.y + center_blue.y) / 2);
+            
+            double cte = midpoint.x - CAMERA_CENTER_X;
+
+            auto now = chrono::high_resolution_clock::now();
+            chrono::duration<double> elapsed = now - prevTime;
+            double dt = elapsed.count();
+            prevTime = now;
+
+            integral += cte * dt;
+            double output = (Kp * cte) + (Ki * integral);
+
+            // Addera output (Vi behåller + eftersom vi vände styrningen tidigare och det fungerade)
+            int current_servo_pwm = base_servo_pwm + static_cast<int>(output);
+            
+            // Begränsa mekaniskt utslag (1900 till 2400)
+            current_servo_pwm = max(1900, min(2400, current_servo_pwm));
+
+            gpioServo(SERVO_PWM, current_servo_pwm);
+            prev_servo_pwm = current_servo_pwm;
+            
+            // Skriv ut data i terminalen för att verifiera att kamerasynen fungerar
+            cout << "CTE: " << cte << " | PWM: " << current_servo_pwm << endl;
+        } 
+        else {
+            // Tappar vi konerna behåller den föregående vinkel
+            gpioServo(SERVO_PWM, prev_servo_pwm);
+        }
+    }
+
+    // --- SÄKER NEDSTÄNGNING ---
+    cap.release();
+    gpioServo(SERVO_PWM, 2150); // Ställ hjulen rakt fram innan vi stänger av
+    gpioPWM(MOTOR_PWM, 0); // Dubbel säkerhet för DC-motorn
+    gpioWrite(MOTOR_IN1, 0); 
+    gpioTerminate();
+    
+    return 0;
+}
