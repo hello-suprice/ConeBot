@@ -154,3 +154,11 @@ int main() {
     gpioTerminate();
     return 0;
 }
+
+
+[ WARN:0@32.375] global cap_gstreamer.cpp:1777 open OpenCV | GStreamer warning: Cannot query video position: status=0, value=-1, duration=-1
+--- AUTONOM KÖRNING STARTAD ---
+
+(Test2:1513): GStreamer-CRITICAL **: 17:06:34.480: gst_sample_get_caps: assertion 'GST_IS_SAMPLE (sample)' failed
+[ERROR:0@107.381] global cap_gstreamer.cpp:934 retrieveVideoFrame GStreamer: gst_sample_get_caps() returns NULL
+Stänger av motorer...
