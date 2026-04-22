@@ -109,6 +109,10 @@ int main() {
                 }
             }
 
+             // ---- LÄGG TILL DENNA RAD HÄR ----
+            cout << "Area Bla: " << maxAreaBlue << " | Area Gul: " << maxAreaYellow << endl;
+            // ---------------------------------
+
             // 3. Filtrera bort brus: Arean måste vara över 500 pixlar
             if (maxAreaBlue > 500 && maxAreaYellow > 500) {
                 
