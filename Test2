@@ -58,10 +58,17 @@ int main() {
     gpioWrite(MOTOR_LOW, 0);
     gpioPWM(MOTOR_PWM, motorSpeed);
 
-    // Starta kameran
-    VideoCapture cap(0);
-    cap.set(CAP_PROP_FRAME_WIDTH, 640);
-    cap.set(CAP_PROP_FRAME_HEIGHT, 480);
+    // Starta kameran med GStreamer pipeline för Raspberry Pi Camera Module 3
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=480 ! videoconvert ! appsink";
+    VideoCapture cap(pipeline, CAP_GSTREAMER);
+
+    // Säkerhetsspärr: Kolla om kameran faktiskt startade
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte öppna kameran! Kolla sladden." << endl;
+        gpioPWM(MOTOR_PWM, 0);
+        gpioTerminate();
+        return -1;
+    }
 
     Mat frame, hsv, maskBlue, maskYellow;
     
