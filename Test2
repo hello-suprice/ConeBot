@@ -1,0 +1,152 @@
+#include <opencv2/opencv.hpp>
+#include <pigpio.h>
+#include <chrono>
+#include <iostream>
+
+using namespace std;
+using namespace cv;
+
+// Pin-konfiguration
+#define MOTOR_PWM 18
+#define MOTOR_HIGH 14
+#define MOTOR_LOW 15
+#define SERVO_PWM 13
+
+// Renodlad PI-Regulator (Ingen D-del för att undvika derivative kick)
+class PI_Controller {
+public:
+    double Kp, Ki, integral;
+    chrono::high_resolution_clock::time_point prevTime;
+
+    PI_Controller(double p, double i) : Kp(p), Ki(i), integral(0) {
+        prevTime = chrono::high_resolution_clock::now();
+    }
+
+    double compute(double setpoint, double current) {
+        auto now = chrono::high_resolution_clock::now();
+        double dt = chrono::duration<double>(now - prevTime).count();
+        prevTime = now;
+
+        double error = setpoint - current;
+        integral += error * dt;
+
+        // Returnerar P-delen + I-delen
+        return (Kp * error) + (Ki * integral);
+    }
+};
+
+int main() {
+    // Starta GPIO
+    if (gpioInitialise() < 0) {
+        cerr << "Misslyckades med att starta pigpio." << endl;
+        return -1;
+    }
+    
+    gpioSetMode(MOTOR_HIGH, PI_OUTPUT);
+    gpioSetMode(MOTOR_LOW, PI_OUTPUT);
+    gpioSetMode(MOTOR_PWM, PI_OUTPUT);
+    gpioSetMode(SERVO_PWM, PI_OUTPUT);
+
+    // PI-inställningar (Börja trimma Kp här, håll Ki väldigt låg)
+    double Kp = 1.5;  
+    double Ki = 0.01; 
+    PI_Controller steeringPI(Kp, Ki);
+
+    // DC-motorns hastighet (mellan 95-190 för max 6V från din 8V/9V-källa)
+    int motorSpeed = 150; 
+    gpioWrite(MOTOR_HIGH, 1);
+    gpioWrite(MOTOR_LOW, 0);
+    gpioPWM(MOTOR_PWM, motorSpeed);
+
+    // Starta kameran
+    VideoCapture cap(0);
+    cap.set(CAP_PROP_FRAME_WIDTH, 640);
+    cap.set(CAP_PROP_FRAME_HEIGHT, 480);
+
+    Mat frame, hsv, maskBlue, maskYellow;
+    
+    // Variabel för att minnas styrvinkeln om konerna försvinner (förhindrar ryck)
+    int currentSteering = 1500; 
+
+    cout << "--- AUTONOM KÖRNING STARTAD ---" << endl;
+
+    while (true) {
+        cap >> frame;
+        if (frame.empty()) break;
+
+        // Konvertera till HSV för att undvika skuggor
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        // 1. Filtrera fram Blå och Gul (Justera dessa HSV-värden för ditt rum vid behov)
+        // Blå färg
+        inRange(hsv, Scalar(100, 150, 50), Scalar(140, 255, 255), maskBlue); 
+        // Gul/Orange färg
+        inRange(hsv, Scalar(20, 100, 100), Scalar(30, 255, 255), maskYellow); 
+
+        vector<vector<Point>> contoursBlue, contoursYellow;
+        findContours(maskBlue, contoursBlue, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(maskYellow, contoursYellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        // 2. SÄKERHETSSPÄRR: Kolla att båda färgerna syns för att stoppa Segmentation Faults
+        if (!contoursBlue.empty() && !contoursYellow.empty()) {
+            
+            double maxAreaBlue = 0, maxAreaYellow = 0;
+            Rect bestBlue, bestYellow;
+            
+            // Hitta den absolut största blåa konen (den närmaste)
+            for (const auto& c : contoursBlue) {
+                if (contourArea(c) > maxAreaBlue) {
+                    maxAreaBlue = contourArea(c);
+                    bestBlue = boundingRect(c);
+                }
+            }
+            
+            // Hitta den absolut största gula konen (den närmaste)
+            for (const auto& c : contoursYellow) {
+                if (contourArea(c) > maxAreaYellow) {
+                    maxAreaYellow = contourArea(c);
+                    bestYellow = boundingRect(c);
+                }
+            }
+
+            // 3. Filtrera bort brus: Arean måste vara över 500 pixlar
+            if (maxAreaBlue > 500 && maxAreaYellow > 500) {
+                
+                // Räkna ut X-koordinaten för konernas respektive mittpunkt
+                double blueCenterX = bestBlue.x + (bestBlue.width / 2.0);
+                double yellowCenterX = bestYellow.x + (bestYellow.width / 2.0);
+
+                // Räkna ut Look-ahead-punkten (exakt mellan de två konerna)
+                double lookAheadX = (blueCenterX + yellowCenterX) / 2.0;
+                
+                // Kamerans mitt är pixel 320. Felet (CTE) blir skillnaden.
+                double cte = 320.0 - lookAheadX;
+
+                // Utskrift till terminalen (Så du kan se vad som händer live)
+                cout << "CTE: " << cte << " | Styrning: " << currentSteering << " | Fart: " << motorSpeed << endl;
+
+                // 4. PI-Regulatorn räknar ut hur mycket servot ska svänga
+                double pidOutput = steeringPI.compute(0, -cte);
+
+                // Applicera på servot (1500 är rakt fram)
+                currentSteering = 1500 + static_cast<int>(pidOutput);
+                
+                // Spärr så att servot inte går utanför sina fysiska gränser
+                currentSteering = max(1000, min(2000, currentSteering)); 
+            }
+        } 
+        
+        // Applicera styrningen (Om den tappade konerna kör den vidare på sin senaste vinkel)
+        gpioServo(SERVO_PWM, currentSteering);
+
+        // Avbryt koden med ESC
+        if (waitKey(30) == 27) break; 
+    }
+
+    // Säker nedstängning
+    cout << "Stänger av motorer..." << endl;
+    gpioPWM(MOTOR_PWM, 0);
+    gpioServo(SERVO_PWM, 1500);
+    gpioTerminate();
+    return 0;
+}
