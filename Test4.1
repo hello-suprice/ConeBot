@@ -1,0 +1,191 @@
+#include <opencv2/opencv.hpp>
+#include <pigpio.h>
+#include <chrono>
+#include <iostream>
+#include <csignal>
+
+using namespace std;
+using namespace cv;
+
+#define SERVO_PWM 13
+
+volatile sig_atomic_t keepRunning = 1;
+
+void stopProgram(int signum) {
+    cout << "\n[Ctrl+C] Avslutar..." << endl;
+    keepRunning = 0;
+}
+
+int main() {
+    int cfg = gpioCfgGetInternals();
+    cfg |= PI_CFG_NOSIGHANDLER;
+    gpioCfgSetInternals(cfg);
+    signal(SIGINT, stopProgram);
+
+    if (gpioInitialise() < 0) {
+        cerr << "Misslyckades med att starta pigpio." << endl;
+        return -1;
+    }
+    gpioSetMode(SERVO_PWM, PI_OUTPUT);
+
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=480 ! videoconvert ! appsink";
+    VideoCapture cap(pipeline, CAP_GSTREAMER);
+
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte öppna kameran!" << endl;
+        gpioTerminate();
+        return -1;
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // JUSTERA DESSA VÄRDEN för att hitta konerna i solljus.
+    // Öka det undre S-värdet (index 1) om konen ser "urtvättad" ut.
+    // Sänk det undre V-värdet (index 2) om konen ser mörk ut.
+    // ─────────────────────────────────────────────────────────────
+    int bH1=100, bS1=90,  bV1=30;   // Blå - nedre gräns
+    int bH2=140, bS2=255, bV2=255;  // Blå - övre gräns
+    int yH1=20,  yS1=120, yV1=70;   // Gul - nedre gräns
+    int yH2=30,  yS2=255, yV2=255;  // Gul - övre gräns
+
+    // Skapa ett fönster med spårstaplar för att justera HSV live
+    namedWindow("HSV-justering", WINDOW_NORMAL);
+    createTrackbar("Bla H min", "HSV-justering", &bH1, 179);
+    createTrackbar("Bla S min", "HSV-justering", &bS1, 255);
+    createTrackbar("Bla V min", "HSV-justering", &bV1, 255);
+    createTrackbar("Bla H max", "HSV-justering", &bH2, 179);
+    createTrackbar("Gul H min", "HSV-justering", &yH1, 179);
+    createTrackbar("Gul S min", "HSV-justering", &yS1, 255);
+    createTrackbar("Gul V min", "HSV-justering", &yV1, 255);
+    createTrackbar("Gul H max", "HSV-justering", &yH2, 179);
+
+    Mat frame, hsv, maskBlue, maskYellow;
+    int currentSteering = 2150;
+
+    cout << "=== VISUELLT DEBUGLÄGE ===" << endl;
+    cout << "Fyra fönster öppnas:" << endl;
+    cout << "  1. Kamera       - Det kameran ser med markeringar" << endl;
+    cout << "  2. Mask Bla     - Vita pixlar = blå kon hittad" << endl;
+    cout << "  3. Mask Gul     - Vita pixlar = gul kon hittad" << endl;
+    cout << "  4. HSV-justering - Dra i spårstaplarna" << endl;
+    cout << "Tryck Ctrl+C för att avsluta." << endl;
+
+    while (keepRunning) {
+        cap >> frame;
+        if (frame.empty()) continue;
+
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        // Bygg masker från aktuella spårstapelvärden
+        inRange(hsv, Scalar(bH1, bS1, bV1), Scalar(bH2, bS2, bV2), maskBlue);
+        inRange(hsv, Scalar(yH1, yS1, yV1), Scalar(yH2, yS2, yV2), maskYellow);
+
+        // Hitta konturer
+        vector<vector<Point>> contoursBlue, contoursYellow;
+        findContours(maskBlue,   contoursBlue,   RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(maskYellow, contoursYellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        double maxAreaBlue = 0, maxAreaYellow = 0;
+        Rect bestBlue, bestYellow;
+
+        for (const auto& c : contoursBlue) {
+            if (contourArea(c) > maxAreaBlue) {
+                maxAreaBlue = contourArea(c);
+                bestBlue = boundingRect(c);
+            }
+        }
+        for (const auto& c : contoursYellow) {
+            if (contourArea(c) > maxAreaYellow) {
+                maxAreaYellow = contourArea(c);
+                bestYellow = boundingRect(c);
+            }
+        }
+
+        // Rita på kamerafönstret
+        Mat display = frame.clone();
+
+        // Mittlinje
+        line(display, Point(320, 0), Point(320, 480), Scalar(255,255,255), 1);
+
+        // Rita bounding boxes och centerpunkter
+        if (maxAreaBlue > 100) {
+            rectangle(display, bestBlue, Scalar(255, 0, 0), 2);
+            Point cB(bestBlue.x + bestBlue.width/2, bestBlue.y + bestBlue.height/2);
+            circle(display, cB, 5, Scalar(255,0,0), -1);
+            putText(display, "BLA", Point(bestBlue.x, bestBlue.y - 8),
+                    FONT_HERSHEY_SIMPLEX, 0.6, Scalar(255,0,0), 2);
+        }
+        if (maxAreaYellow > 100) {
+            rectangle(display, bestYellow, Scalar(0, 200, 255), 2);
+            Point cY(bestYellow.x + bestYellow.width/2, bestYellow.y + bestYellow.height/2);
+            circle(display, cY, 5, Scalar(0,200,255), -1);
+            putText(display, "GUL", Point(bestYellow.x, bestYellow.y - 8),
+                    FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0,200,255), 2);
+        }
+
+        // Om BÅDA ses: rita look-ahead-punkt, CTE och styr servo
+        if (maxAreaBlue > 100 && maxAreaYellow > 100) {
+            double blueCX  = bestBlue.x   + bestBlue.width   / 2.0;
+            double yellowCX= bestYellow.x + bestYellow.width / 2.0;
+            double lookX   = (blueCX + yellowCX) / 2.0;
+            double blueCY  = bestBlue.y   + bestBlue.height  / 2.0;
+            double yellowCY= bestYellow.y + bestYellow.height/ 2.0;
+            double lookY   = (blueCY + yellowCY) / 2.0;
+
+            double cte = 320.0 - lookX;
+
+            // Look-ahead-punkt
+            circle(display, Point((int)lookX, (int)lookY), 8, Scalar(0,255,0), -1);
+            // Linje från bild-botten till look-ahead
+            line(display, Point(320, 480), Point((int)lookX, (int)lookY), Scalar(0,255,0), 2);
+
+            // CTE-text
+            string cteStr = "CTE: " + to_string((int)cte) + " px";
+            putText(display, cteStr, Point(10, 30),
+                    FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0,255,0), 2);
+
+            // Beräkna styrning (enkel P-del för debug)
+            double Kp = 1.5;
+            currentSteering = 2150 + (int)(Kp * (-cte));
+            currentSteering = max(1900, min(2400, currentSteering));
+
+            string steerStr = "PWM: " + to_string(currentSteering);
+            putText(display, steerStr, Point(10, 65),
+                    FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0,255,0), 2);
+
+            putText(display, "KONPAR HITTAT", Point(10, 100),
+                    FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0,255,0), 2);
+
+            gpioServo(SERVO_PWM, currentSteering);
+
+        } else {
+            // Visa vad som saknas
+            string missing = "";
+            if (maxAreaBlue   <= 100) missing += "SAKNAR BLA  ";
+            if (maxAreaYellow <= 100) missing += "SAKNAR GUL";
+            putText(display, missing, Point(10, 30),
+                    FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0,0,255), 2);
+
+            // Visa areorna så du vet hur nära du är gränsen 100
+            string areaStr = "Area bla: " + to_string((int)maxAreaBlue)
+                           + "  gul: " + to_string((int)maxAreaYellow);
+            putText(display, areaStr, Point(10, 65),
+                    FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0,100,255), 2);
+
+            gpioServo(SERVO_PWM, 2150); // Rakt fram när inget ses
+        }
+
+        // Visa alla fönster
+        imshow("Kamera", display);
+        imshow("Mask Bla",  maskBlue);
+        imshow("Mask Gul", maskYellow);
+
+        if (waitKey(1) == 27) break; // ESC stänger också
+    }
+
+    cout << "Stänger ner..." << endl;
+    gpioServo(SERVO_PWM, 2150);
+    gpioDelay(200000);
+    gpioTerminate();
+    destroyAllWindows();
+    return 0;
+}
