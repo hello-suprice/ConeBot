@@ -1,0 +1,157 @@
+#include <opencv2/opencv.hpp>
+#include <pigpio.h>
+#include <chrono>
+#include <iostream>
+#include <csignal> // Viktigt för Ctrl+C hantering
+
+using namespace std;
+using namespace cv;
+
+// Pin-konfiguration
+#define MOTOR_PWM 18
+#define MOTOR_HIGH 14
+#define MOTOR_LOW 15
+#define SERVO_PWM 13
+
+// Variabel för att hålla loopen igång
+volatile sig_atomic_t keepRunning = 1;
+
+// Vår egna säkra avstängning för Ctrl+C
+void stopProgram(int signum) {
+    cout << "\n[Ctrl+C upptäckt] Avslutar programmet mjukt..." << endl;
+    keepRunning = 0;
+}
+
+// PI-Regulator
+class PI_Controller {
+public:
+    double Kp, Ki, integral;
+    chrono::high_resolution_clock::time_point prevTime;
+
+    PI_Controller(double p, double i) : Kp(p), Ki(i), integral(0) {
+        prevTime = chrono::high_resolution_clock::now();
+    }
+
+    double compute(double setpoint, double current) {
+        auto now = chrono::high_resolution_clock::now();
+        double dt = chrono::duration<double>(now - prevTime).count();
+        prevTime = now;
+
+        double error = setpoint - current;
+        integral += error * dt;
+        return (Kp * error) + (Ki * integral);
+    }
+};
+
+int main() {
+    // VIKTIGT: Stäng av pigpio's inbyggda krock med Ctrl+C så bilen inte skenar!
+    int cfg = gpioCfgGetInternals();
+    cfg |= PI_CFG_NOSIGHANDLER;
+    gpioCfgSetInternals(cfg);
+
+    // Tala om för Linux att använda vår egen funktion när vi trycker Ctrl+C
+    signal(SIGINT, stopProgram);
+
+    if (gpioInitialise() < 0) {
+        cerr << "Misslyckades med att starta pigpio." << endl;
+        return -1;
+    }
+    
+    gpioSetMode(MOTOR_HIGH, PI_OUTPUT);
+    gpioSetMode(MOTOR_LOW, PI_OUTPUT);
+    gpioSetMode(MOTOR_PWM, PI_OUTPUT);
+    gpioSetMode(SERVO_PWM, PI_OUTPUT);
+
+    double Kp = 1.5;  
+    double Ki = 0.01; 
+    PI_Controller steeringPI(Kp, Ki);
+
+    // Ställ farten (Du kan sätta denna till 0 igen för att testa styrningen först)
+    int motorSpeed = 120; 
+    gpioWrite(MOTOR_HIGH, 1);
+    gpioWrite(MOTOR_LOW, 0);
+    gpioPWM(MOTOR_PWM, motorSpeed);
+
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=480 ! videoconvert ! appsink";
+    VideoCapture cap(pipeline, CAP_GSTREAMER);
+
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte öppna kameran! Kolla sladden." << endl;
+        gpioWrite(MOTOR_HIGH, 0);
+        gpioPWM(MOTOR_PWM, 0);
+        gpioTerminate();
+        return -1;
+    }
+
+    Mat frame, hsv, maskBlue, maskYellow;
+    int currentSteering = 2150; 
+
+    cout << "--- AUTONOM KÖRNING STARTAD ---" << endl;
+
+    while (keepRunning) { // Loopen stannar snyggt när vi trycker Ctrl+C
+        cap >> frame;
+        if (frame.empty()) continue;
+
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        // Dina fungerande HSV-gränser (Justera om det behövs från test6)
+        inRange(hsv, Scalar(100, 90, 30), Scalar(140, 255, 255), maskBlue); 
+        inRange(hsv, Scalar(20, 120, 70), Scalar(30, 255, 255), maskYellow); 
+
+        vector<vector<Point>> contoursBlue, contoursYellow;
+        findContours(maskBlue, contoursBlue, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(maskYellow, contoursYellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        double maxAreaBlue = 0, maxAreaYellow = 0;
+        Rect bestBlue, bestYellow;
+
+        for (const auto& c : contoursBlue) {
+            if (contourArea(c) > maxAreaBlue) {
+                maxAreaBlue = contourArea(c);
+                bestBlue = boundingRect(c);
+            }
+        }
+        
+        for (const auto& c : contoursYellow) {
+            if (contourArea(c) > maxAreaYellow) {
+                maxAreaYellow = contourArea(c);
+                bestYellow = boundingRect(c);
+            }
+        }
+
+        // FELSÖKNING: Denna rad är nu utanför spärren, den skriver alltid ut!
+        cout << "Area Bla: " << maxAreaBlue << " | Area Gul: " << maxAreaYellow << endl;
+
+        // Bilen svänger BARA om den ser båda konerna (Area > 100)
+        if (maxAreaBlue > 100 && maxAreaYellow > 100) {
+            
+            double blueCenterX = bestBlue.x + (bestBlue.width / 2.0);
+            double yellowCenterX = bestYellow.x + (bestYellow.width / 2.0);
+            double lookAheadX = (blueCenterX + yellowCenterX) / 2.0;
+            
+            double cte = 320.0 - lookAheadX;
+
+            double pidOutput = steeringPI.compute(0, -cte);
+
+            currentSteering = 2150 + static_cast<int>(pidOutput);
+            currentSteering = max(1900, min(2400, currentSteering)); 
+            
+            cout << ">>> SAKERT PAR HITTAT! CTE: " << cte << " | Styrning: " << currentSteering << endl;
+        } else {
+            cout << "VARNING: Saknar en av konerna! Bilen fortsatter rakt." << endl;
+        }
+        
+        gpioServo(SERVO_PWM, currentSteering);
+    }
+
+    // --- SÄKER AVSTÄNGNING NÄR KEEP RUNNING = 0 ---
+    cout << "\nStänger av motorer säkert..." << endl;
+    gpioWrite(MOTOR_HIGH, 0);
+    gpioWrite(MOTOR_LOW, 0);
+    gpioPWM(MOTOR_PWM, 0);
+    gpioServo(SERVO_PWM, 2150); // Ställ hjulen rakt
+    gpioDelay(200000);          // Ge H-bryggan 0.2 sekunder att reagera
+    gpioTerminate();
+    
+    return 0;
+}
