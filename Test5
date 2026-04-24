@@ -1,0 +1,150 @@
+#include <opencv2/opencv.hpp>
+#include <pigpio.h>
+#include <chrono>
+#include <iostream>
+#include <csignal>
+
+using namespace std;
+using namespace cv;
+
+#define MOTOR_PWM  18
+#define MOTOR_HIGH 14
+#define MOTOR_LOW  15
+#define SERVO_PWM  13
+
+volatile sig_atomic_t keepRunning = 1;
+
+void stopProgram(int signum) {
+    cout << "\n[Ctrl+C] Avslutar..." << endl;
+    keepRunning = 0;
+}
+
+int main() {
+    int cfg = gpioCfgGetInternals();
+    cfg |= PI_CFG_NOSIGHANDLER;
+    gpioCfgSetInternals(cfg);
+    signal(SIGINT, stopProgram);
+
+    if (gpioInitialise() < 0) {
+        cerr << "Misslyckades med att starta pigpio." << endl;
+        return -1;
+    }
+
+    gpioSetMode(MOTOR_HIGH, PI_OUTPUT);
+    gpioSetMode(MOTOR_LOW,  PI_OUTPUT);
+    gpioSetMode(MOTOR_PWM,  PI_OUTPUT);
+    gpioSetMode(SERVO_PWM,  PI_OUTPUT);
+
+    // ─────────────────────────────────────────────────────────────
+    // FART: håll under 150 med 10-11V batteri så motorn inte
+    // får mer än ~6V i genomsnitt. 120 = ~47% = ca 5V effektivt.
+    // ─────────────────────────────────────────────────────────────
+    int motorSpeed = 120;
+    gpioWrite(MOTOR_HIGH, 1);
+    gpioWrite(MOTOR_LOW,  0);
+    gpioPWM(MOTOR_PWM, motorSpeed);
+
+    // ─────────────────────────────────────────────────────────────
+    // PI-PARAMETRAR
+    // Vinglar: sänk Kp mot 0.4
+    // Svänger för lite: höj Kp mot 1.2
+    // Kör snett på raksträcka: höj Ki till 0.005
+    // ─────────────────────────────────────────────────────────────
+    double Kp = 0.8;
+    double Ki = 0.0;
+    double integral = 0.0;
+    auto prevTime = chrono::high_resolution_clock::now();
+
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=480 ! videoconvert ! appsink";
+    VideoCapture cap(pipeline, CAP_GSTREAMER);
+
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte öppna kameran!" << endl;
+        gpioWrite(MOTOR_HIGH, 0);
+        gpioWrite(MOTOR_LOW,  0);
+        gpioPWM(MOTOR_PWM, 0);
+        gpioTerminate();
+        return -1;
+    }
+
+    Mat frame, hsv, maskBlue, maskYellow;
+    int currentSteering = 2150;
+
+    cout << "=== HEADLESS KÖRNING STARTAD ===" << endl;
+    cout << "Fart: " << motorSpeed << "/255" << endl;
+    cout << "Kp=" << Kp << "  Ki=" << Ki << endl;
+    cout << "Tryck Ctrl+C för att stoppa." << endl;
+
+    while (keepRunning) {
+        cap >> frame;
+        if (frame.empty()) continue;
+
+        flip(frame, frame, -1);
+
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        // Kalibrerade HSV-värden från debugtest
+        inRange(hsv, Scalar(109, 129, 23), Scalar(130, 255, 255), maskBlue);
+        inRange(hsv, Scalar(17,  175, 62), Scalar(34,  255, 255), maskYellow);
+
+        vector<vector<Point>> contoursBlue, contoursYellow;
+        findContours(maskBlue,   contoursBlue,   RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(maskYellow, contoursYellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        double maxAreaBlue = 0, maxAreaYellow = 0;
+        Rect bestBlue, bestYellow;
+
+        for (const auto& c : contoursBlue) {
+            if (contourArea(c) > maxAreaBlue) {
+                maxAreaBlue = contourArea(c);
+                bestBlue = boundingRect(c);
+            }
+        }
+        for (const auto& c : contoursYellow) {
+            if (contourArea(c) > maxAreaYellow) {
+                maxAreaYellow = contourArea(c);
+                bestYellow = boundingRect(c);
+            }
+        }
+
+        if (maxAreaBlue > 100 && maxAreaYellow > 100) {
+
+            double blueCX     = bestBlue.x   + bestBlue.width   / 2.0;
+            double yellowCX   = bestYellow.x + bestYellow.width / 2.0;
+            double lookAheadX = (blueCX + yellowCX) / 2.0;
+
+            double cte = 320.0 - lookAheadX;
+
+            auto now = chrono::high_resolution_clock::now();
+            double dt = chrono::duration<double>(now - prevTime).count();
+            prevTime = now;
+
+            integral += cte * dt;
+            double output = (Kp * cte) + (Ki * integral);
+
+            currentSteering = 2150 + static_cast<int>(output);
+            currentSteering = max(1900, min(2400, currentSteering));
+
+            cout << "CTE: " << (int)cte
+                 << " | PWM: " << currentSteering << endl;
+
+        } else {
+            integral = 0.0;
+            prevTime = chrono::high_resolution_clock::now();
+            cout << "SAKNAR KON - bla: " << (int)maxAreaBlue
+                 << " gul: " << (int)maxAreaYellow << endl;
+        }
+
+        gpioServo(SERVO_PWM, currentSteering);
+    }
+
+    // Säker avstängning
+    cout << "Stänger av..." << endl;
+    gpioWrite(MOTOR_HIGH, 0);
+    gpioWrite(MOTOR_LOW,  0);
+    gpioPWM(MOTOR_PWM, 0);
+    gpioServo(SERVO_PWM, 2150);
+    gpioDelay(200000);
+    gpioTerminate();
+    return 0;
+}
