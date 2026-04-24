@@ -1,0 +1,192 @@
+#include <opencv2/opencv.hpp>
+#include <pigpio.h>
+#include <iostream>
+#include <csignal>
+
+using namespace std;
+using namespace cv;
+
+#define SERVO_PWM 13
+
+volatile sig_atomic_t keepRunning = 1;
+
+void stopProgram(int signum) {
+    cout << "\n[Ctrl+C] Avslutar..." << endl;
+    keepRunning = 0;
+}
+
+int main() {
+    int cfg = gpioCfgGetInternals();
+    cfg |= PI_CFG_NOSIGHANDLER;
+    gpioCfgSetInternals(cfg);
+    signal(SIGINT, stopProgram);
+
+    if (gpioInitialise() < 0) {
+        cerr << "Misslyckades med att starta pigpio." << endl;
+        return -1;
+    }
+    gpioSetMode(SERVO_PWM, PI_OUTPUT);
+
+    // ─────────────────────────────────────────────────────────────
+    // JUSTERA Kp här om servot svänger för lite eller för mycket
+    // ─────────────────────────────────────────────────────────────
+    double Kp = 1.5;
+
+    // Spårstapel för Kp så du kan justera live
+    int KpSlider = 15; // 15 = Kp 1.5 (vi delar med 10 i koden)
+
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=480 ! videoconvert ! appsink";
+    VideoCapture cap(pipeline, CAP_GSTREAMER);
+
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte öppna kameran!" << endl;
+        gpioTerminate();
+        return -1;
+    }
+
+    namedWindow("Servo-test", WINDOW_NORMAL);
+    createTrackbar("Kp (x0.1)", "Servo-test", &KpSlider, 50);
+
+    Mat frame, hsv, maskBlue, maskYellow;
+    int currentSteering = 2150;
+
+    cout << "=== SERVO-VISUALISERINGSTEST ===" << endl;
+    cout << "Rör konerna i sidled och se servot svänga." << endl;
+    cout << "Dra i Kp-spårstapeln för att justera känslighet." << endl;
+    cout << "Tryck Ctrl+C eller ESC för att avsluta." << endl;
+
+    while (keepRunning) {
+        cap >> frame;
+        if (frame.empty()) continue;
+
+        flip(frame, frame, -1);
+
+        Kp = KpSlider / 10.0;
+
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        inRange(hsv, Scalar(109, 129, 23), Scalar(130, 255, 255), maskBlue);
+        inRange(hsv, Scalar(17,  175, 62), Scalar(34,  255, 255), maskYellow);
+
+        vector<vector<Point>> contoursBlue, contoursYellow;
+        findContours(maskBlue,   contoursBlue,   RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(maskYellow, contoursYellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        double maxAreaBlue = 0, maxAreaYellow = 0;
+        Rect bestBlue, bestYellow;
+
+        for (const auto& c : contoursBlue) {
+            if (contourArea(c) > maxAreaBlue) {
+                maxAreaBlue = contourArea(c);
+                bestBlue = boundingRect(c);
+            }
+        }
+        for (const auto& c : contoursYellow) {
+            if (contourArea(c) > maxAreaYellow) {
+                maxAreaYellow = contourArea(c);
+                bestYellow = boundingRect(c);
+            }
+        }
+
+        Mat display = frame.clone();
+
+        // Mittlinje
+        line(display, Point(320, 0), Point(320, 480), Scalar(255, 255, 255), 1);
+
+        // Rita bounding boxes
+        if (maxAreaBlue > 100) {
+            rectangle(display, bestBlue, Scalar(255, 0, 0), 2);
+            Point cB(bestBlue.x + bestBlue.width/2, bestBlue.y + bestBlue.height/2);
+            circle(display, cB, 5, Scalar(255, 0, 0), -1);
+        }
+        if (maxAreaYellow > 100) {
+            rectangle(display, bestYellow, Scalar(0, 200, 255), 2);
+            Point cY(bestYellow.x + bestYellow.width/2, bestYellow.y + bestYellow.height/2);
+            circle(display, cY, 5, Scalar(0, 200, 255), -1);
+        }
+
+        if (maxAreaBlue > 100 && maxAreaYellow > 100) {
+
+            double blueCX     = bestBlue.x   + bestBlue.width   / 2.0;
+            double yellowCX   = bestYellow.x + bestYellow.width / 2.0;
+            double lookAheadX = (blueCX + yellowCX) / 2.0;
+            double blueCY     = bestBlue.y   + bestBlue.height  / 2.0;
+            double yellowCY   = bestYellow.y + bestYellow.height / 2.0;
+            double lookAheadY = (blueCY + yellowCY) / 2.0;
+
+            double cte = 320.0 - lookAheadX;
+            double output = Kp * cte;
+
+            // OBS: byt + mot - här om servot svänger åt fel håll
+            currentSteering = 2150 - static_cast<int>(output);
+            currentSteering = max(1900, min(2400, currentSteering));
+
+            // Rita look-ahead-punkt och linje
+            circle(display, Point((int)lookAheadX, (int)lookAheadY), 8, Scalar(0, 255, 0), -1);
+            line(display, Point(320, 480), Point((int)lookAheadX, (int)lookAheadY), Scalar(0, 255, 0), 2);
+
+            // ─── STYRINDIKATOR längst ned ───────────────────────────────
+            // En bar som visar hur mycket och åt vilket håll servot svänger
+            int barCenterX = 320;
+            int barY       = 460;
+            int barHalfW   = 200; // ±200px = hela skalan 1900-2400
+
+            // Bakgrund för baren
+            rectangle(display, Point(barCenterX - barHalfW, barY - 10),
+                                Point(barCenterX + barHalfW, barY + 10),
+                                Scalar(60, 60, 60), -1);
+
+            // Neutral-markering
+            line(display, Point(barCenterX, barY - 14), Point(barCenterX, barY + 14),
+                 Scalar(255, 255, 255), 1);
+
+            // Färgad del som visar aktuell styrning
+            // 1900 = -200px, 2150 = 0px, 2400 = +200px
+            int barOffset = (int)(((currentSteering - 2150) / 250.0) * barHalfW);
+            Scalar barColor = (barOffset > 0) ? Scalar(0, 150, 255) : Scalar(255, 150, 0);
+            rectangle(display, Point(barCenterX, barY - 8),
+                                Point(barCenterX + barOffset, barY + 8),
+                                barColor, -1);
+
+            // Text bredvid baren
+            string leftLabel  = "VANSTER";
+            string rightLabel = "HOGER";
+            putText(display, leftLabel,  Point(barCenterX - barHalfW - 5, barY + 5),
+                    FONT_HERSHEY_SIMPLEX, 0.4, Scalar(200, 200, 200), 1, LINE_AA, true);
+            putText(display, rightLabel, Point(barCenterX + barHalfW + 5, barY + 5),
+                    FONT_HERSHEY_SIMPLEX, 0.4, Scalar(200, 200, 200), 1);
+
+            // Info-text
+            putText(display, "CTE: " + to_string((int)cte) + " px",
+                    Point(10, 30), FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0, 255, 0), 2);
+            putText(display, "PWM: " + to_string(currentSteering),
+                    Point(10, 60), FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0, 255, 0), 2);
+            putText(display, "Kp:  " + to_string(Kp).substr(0, 4),
+                    Point(10, 90), FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0, 255, 255), 2);
+
+            gpioServo(SERVO_PWM, currentSteering);
+
+        } else {
+            string missing = "";
+            if (maxAreaBlue   <= 100) missing += "SAKNAR BLA  ";
+            if (maxAreaYellow <= 100) missing += "SAKNAR GUL";
+            putText(display, missing, Point(10, 30),
+                    FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0, 0, 255), 2);
+            putText(display, "Area bla: " + to_string((int)maxAreaBlue) +
+                             "  gul: "    + to_string((int)maxAreaYellow),
+                    Point(10, 65), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 100, 255), 2);
+
+            gpioServo(SERVO_PWM, 2150);
+        }
+
+        imshow("Servo-test", display);
+        if (waitKey(1) == 27) break;
+    }
+
+    cout << "Stänger ner..." << endl;
+    gpioServo(SERVO_PWM, 2150);
+    gpioDelay(200000);
+    gpioTerminate();
+    destroyAllWindows();
+    return 0;
+}
