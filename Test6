@@ -1,0 +1,176 @@
+#include <opencv2/opencv.hpp>
+#include <pigpio.h>
+#include <chrono>
+#include <iostream>
+#include <csignal>
+
+using namespace std;
+using namespace cv;
+
+#define MOTOR_PWM  18
+#define MOTOR_HIGH 14
+#define MOTOR_LOW  15
+#define SERVO_PWM  13
+
+volatile sig_atomic_t keepRunning = 1;
+
+void stopProgram(int signum) {
+    cout << "\n[Ctrl+C] Avslutar..." << endl;
+    keepRunning = 0;
+}
+
+int main() {
+    int cfg = gpioCfgGetInternals();
+    cfg |= PI_CFG_NOSIGHANDLER;
+    gpioCfgSetInternals(cfg);
+    signal(SIGINT, stopProgram);
+
+    if (gpioInitialise() < 0) {
+        cerr << "Misslyckades med att starta pigpio." << endl;
+        return -1;
+    }
+
+    gpioSetMode(MOTOR_HIGH, PI_OUTPUT);
+    gpioSetMode(MOTOR_LOW,  PI_OUTPUT);
+    gpioSetMode(MOTOR_PWM,  PI_OUTPUT);
+    gpioSetMode(SERVO_PWM,  PI_OUTPUT);
+
+    // Motor avstängd från start
+    gpioWrite(MOTOR_HIGH, 0);
+    gpioWrite(MOTOR_LOW,  0);
+    gpioPWM(MOTOR_PWM, 0);
+
+    // ─────────────────────────────────────────────────────────────
+    // PARAMETRAR att justera
+    // ─────────────────────────────────────────────────────────────
+    int    motorSpeed   = 120;   // håll under 150 med 10-11V batteri
+    double Kp           = 1.5;
+    double Ki           = 0.0;
+    int    startDelaySec = 2;    // sekunder innan motorn startar
+    // Mjukhetsfaktor 0.0-1.0: högre = mjukare men trögare styrning
+    // 0.3 = 30% föregående + 70% nytt värde
+    double smoothing    = 0.3;
+    // ─────────────────────────────────────────────────────────────
+
+    string pipeline = "libcamerasrc ! video/x-raw, width=640, height=480 ! videoconvert ! appsink";
+    VideoCapture cap(pipeline, CAP_GSTREAMER);
+
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte öppna kameran!" << endl;
+        gpioTerminate();
+        return -1;
+    }
+
+    Mat frame, hsv, maskBlue, maskYellow;
+    int    currentSteering = 2150;
+    double smoothedSteering = 2150.0;
+    double integral = 0.0;
+    auto   prevTime = chrono::high_resolution_clock::now();
+
+    // ── UPPVÄRMNINGSFAS: kameran ser koner men motorn är av ──────
+    cout << "=== STARTAR OM " << startDelaySec << " SEK ===" << endl;
+    cout << "Ställ bilen framför konerna nu." << endl;
+
+    auto startTime = chrono::high_resolution_clock::now();
+    bool motorStarted = false;
+
+    while (keepRunning) {
+        cap >> frame;
+        if (frame.empty()) continue;
+
+        flip(frame, frame, -1);
+
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        inRange(hsv, Scalar(109, 129, 23), Scalar(130, 255, 255), maskBlue);
+        inRange(hsv, Scalar(17,  175, 62), Scalar(34,  255, 255), maskYellow);
+
+        vector<vector<Point>> contoursBlue, contoursYellow;
+        findContours(maskBlue,   contoursBlue,   RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(maskYellow, contoursYellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        double maxAreaBlue = 0, maxAreaYellow = 0;
+        Rect bestBlue, bestYellow;
+
+        for (const auto& c : contoursBlue) {
+            if (contourArea(c) > maxAreaBlue) {
+                maxAreaBlue = contourArea(c);
+                bestBlue = boundingRect(c);
+            }
+        }
+        for (const auto& c : contoursYellow) {
+            if (contourArea(c) > maxAreaYellow) {
+                maxAreaYellow = contourArea(c);
+                bestYellow = boundingRect(c);
+            }
+        }
+
+        // Beräkna styrning oavsett om motorn är igång eller inte
+        if (maxAreaBlue > 100 && maxAreaYellow > 100) {
+
+            double blueCX     = bestBlue.x   + bestBlue.width   / 2.0;
+            double yellowCX   = bestYellow.x + bestYellow.width / 2.0;
+            double lookAheadX = (blueCX + yellowCX) / 2.0;
+
+            double cte = 320.0 - lookAheadX;
+
+            auto now = chrono::high_resolution_clock::now();
+            double dt = chrono::duration<double>(now - prevTime).count();
+            prevTime = now;
+
+            integral += cte * dt;
+            double output = (Kp * cte) + (Ki * integral);
+
+            currentSteering = 2150 - static_cast<int>(output);
+            currentSteering = max(1900, min(2400, currentSteering));
+
+            // Mjuk styrning: blanda föregående och nytt värde
+            smoothedSteering = smoothing * smoothedSteering
+                              + (1.0 - smoothing) * currentSteering;
+
+            cout << "CTE: " << (int)cte
+                 << " | PWM: " << (int)smoothedSteering
+                 << " | Bla: " << (int)maxAreaBlue
+                 << " | Gul: " << (int)maxAreaYellow;
+
+        } else {
+            integral = 0.0;
+            prevTime = chrono::high_resolution_clock::now();
+            smoothedSteering = smoothing * smoothedSteering
+                              + (1.0 - smoothing) * 2150.0;
+            cout << "SAKNAR KON - Bla: " << (int)maxAreaBlue
+                 << " Gul: " << (int)maxAreaYellow;
+        }
+
+        // Starta motorn efter delay
+        auto elapsed = chrono::duration<double>(
+            chrono::high_resolution_clock::now() - startTime).count();
+
+        if (!motorStarted && elapsed >= startDelaySec) {
+            cout << "\n>>> MOTORN STARTAR NU <<<" << endl;
+            gpioWrite(MOTOR_HIGH, 1);
+            gpioWrite(MOTOR_LOW,  0);
+            gpioPWM(MOTOR_PWM, motorSpeed);
+            motorStarted = true;
+        }
+
+        if (!motorStarted) {
+            int countdown = startDelaySec - (int)elapsed;
+            cout << " | Start om: " << countdown << "s";
+        }
+
+        cout << endl;
+
+        gpioServo(SERVO_PWM, (int)smoothedSteering);
+    }
+
+    // Säker avstängning
+    cout << "Stänger av..." << endl;
+    gpioWrite(MOTOR_HIGH, 0);
+    gpioWrite(MOTOR_LOW,  0);
+    gpioPWM(MOTOR_PWM, 0);
+    gpioServo(SERVO_PWM, 2150);
+    gpioDelay(200000);
+    gpioTerminate();
+    return 0;
+}
