@@ -3,6 +3,7 @@
 #include <chrono>
 #include <iostream>
 #include <csignal>
+#include <ctime>
 
 using namespace std;
 using namespace cv;
@@ -40,8 +41,6 @@ int main() {
     gpioPWM(MOTOR_PWM, 0);
 
     // ─────────────────────────────────────────────────────────────
-    // PARAMETRAR
-    // ─────────────────────────────────────────────────────────────
     int    motorSpeed    = 110;
     double Kp            = 1.2;
     double Ki            = 0.01;
@@ -59,8 +58,33 @@ int main() {
         return -1;
     }
 
-    namedWindow("ConeBot", WINDOW_NORMAL);
-    resizeWindow("ConeBot", 800, 600);
+    // ─── VIDEOINSPELNING ─────────────────────────────────────────
+    // Skapa filnamn med tidsstämpel så filer inte skrivs över
+    time_t now = time(nullptr);
+    char timestr[64];
+    strftime(timestr, sizeof(timestr), "%Y%m%d_%H%M%S", localtime(&now));
+    string videoFile = "/home/pi/conebot_run_" + string(timestr) + ".mp4";
+
+    // mp4v är vanligast och fungerar med standard OpenCV på Pi
+    VideoWriter writer(videoFile,
+                       VideoWriter::fourcc('m','p','4','v'),
+                       20.0,                  // FPS i videofilen
+                       Size(640, 480));
+
+    if (!writer.isOpened()) {
+        cerr << "Kunde inte skapa videofilen! Kollar avi-format..." << endl;
+        videoFile = "/home/pi/conebot_run_" + string(timestr) + ".avi";
+        writer.open(videoFile,
+                    VideoWriter::fourcc('M','J','P','G'),
+                    20.0, Size(640, 480));
+        if (!writer.isOpened()) {
+            cerr << "Kunde inte skapa videofil alls. Avbryter." << endl;
+            gpioTerminate();
+            return -1;
+        }
+    }
+
+    cout << "Spelar in till: " << videoFile << endl;
 
     Mat frame, hsv, maskBlue, maskYellow;
     int    currentSteering  = 2150;
@@ -69,7 +93,7 @@ int main() {
     auto   prevTime = chrono::high_resolution_clock::now();
 
     cout << "=== STARTAR OM " << startDelaySec << " SEK ===" << endl;
-    cout << "Tryck ESC i fönstret eller Ctrl+C i terminalen för att avsluta." << endl;
+    cout << "Tryck Ctrl+C för att avsluta." << endl;
 
     auto startTime = chrono::high_resolution_clock::now();
     bool motorStarted = false;
@@ -82,7 +106,6 @@ int main() {
 
         cvtColor(frame, hsv, COLOR_BGR2HSV);
 
-        // HSV-värden från kalibrering
         inRange(hsv, Scalar(109, 129, 23),  Scalar(130, 255, 255), maskBlue);
         inRange(hsv, Scalar(17,  175, 142), Scalar(34,  255, 255), maskYellow);
 
@@ -108,13 +131,12 @@ int main() {
             }
         }
 
-        // Visualisering
         Mat display = frame.clone();
 
         // Mittlinje
         line(display, Point(320, 0), Point(320, 480), Scalar(255, 255, 255), 1);
 
-        // ALLA blå konturer i tunn linje (för att se vad som hittas men inte används)
+        // Alla blå/gula konturer som tunna boxar
         for (const auto& c : contoursBlue) {
             if (contourArea(c) > 30) {
                 rectangle(display, boundingRect(c), Scalar(150, 80, 0), 1);
@@ -126,7 +148,7 @@ int main() {
             }
         }
 
-        // Bäst hittade koner i tjock linje
+        // Bästa koner i tjock linje
         if (maxAreaBlue > minArea) {
             rectangle(display, bestBlue, Scalar(255, 0, 0), 3);
             Point cB(bestBlue.x + bestBlue.width/2, bestBlue.y + bestBlue.height/2);
@@ -144,9 +166,7 @@ int main() {
                     FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0, 200, 255), 2);
         }
 
-        // Beräkna styrning
         if (maxAreaBlue > minArea && maxAreaYellow > minArea) {
-
             double blueCX     = bestBlue.x   + bestBlue.width   / 2.0;
             double yellowCX   = bestYellow.x + bestYellow.width / 2.0;
             double lookAheadX = (blueCX + yellowCX) / 2.0;
@@ -169,13 +189,8 @@ int main() {
             smoothedSteering = smoothing * smoothedSteering
                               + (1.0 - smoothing) * currentSteering;
 
-            // Linje mellan konerna
-            line(display,
-                 Point((int)blueCX, (int)blueCY),
-                 Point((int)yellowCX, (int)yellowCY),
-                 Scalar(0, 255, 0), 2);
-
-            // Look-ahead-punkt
+            line(display, Point((int)blueCX, (int)blueCY),
+                 Point((int)yellowCX, (int)yellowCY), Scalar(0, 255, 0), 2);
             circle(display, Point((int)lookAheadX, (int)lookAheadY), 10,
                    Scalar(0, 255, 0), -1);
             line(display, Point(320, 480),
@@ -206,7 +221,7 @@ int main() {
                     Point(10, 60), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0, 100, 255), 2);
         }
 
-        // Styrindikator-bar längst ned
+        // Styrindikator-bar
         int barCenterX = 320;
         int barY       = 460;
         int barHalfW   = 200;
@@ -221,7 +236,7 @@ int main() {
                             Point(barCenterX + barOffset, barY + 6),
                             barColor, -1);
 
-        // Motor-status och nedräkning
+        // Motorstart
         auto elapsed = chrono::duration<double>(
             chrono::high_resolution_clock::now() - startTime).count();
 
@@ -245,17 +260,21 @@ int main() {
 
         gpioServo(SERVO_PWM, (int)smoothedSteering);
 
-        imshow("ConeBot", display);
-        if (waitKey(1) == 27) break;
+        // Spara frame till video
+        writer.write(display);
     }
 
-    cout << "Stänger av..." << endl;
+    cout << "Stänger av motorer och sparar video..." << endl;
     gpioWrite(MOTOR_HIGH, 0);
     gpioWrite(MOTOR_LOW,  0);
     gpioPWM(MOTOR_PWM, 0);
     gpioServo(SERVO_PWM, 2150);
     gpioDelay(200000);
     gpioTerminate();
-    destroyAllWindows();
+
+    writer.release();
+    cap.release();
+
+    cout << "Video sparad: " << videoFile << endl;
     return 0;
 }
