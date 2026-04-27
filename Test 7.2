@@ -1,0 +1,315 @@
+#include <opencv2/opencv.hpp>
+#include <pigpio.h>
+#include <chrono>
+#include <iostream>
+#include <csignal>
+#include <ctime>
+
+using namespace std;
+using namespace cv;
+
+#define MOTOR_PWM  18
+#define MOTOR_HIGH 14
+#define MOTOR_LOW  15
+#define SERVO_PWM  13
+
+volatile sig_atomic_t keepRunning = 1;
+
+void stopProgram(int signum) {
+    cout << "\n[Ctrl+C] Avslutar..." << endl;
+    keepRunning = 0;
+}
+
+// Säker avstängning av motorer - kallas alltid oavsett vad
+void safeShutdown() {
+    gpioWrite(MOTOR_HIGH, 0);
+    gpioWrite(MOTOR_LOW,  0);
+    gpioPWM(MOTOR_PWM, 0);
+    gpioServo(SERVO_PWM, 2150);
+    gpioDelay(300000);
+    gpioTerminate();
+}
+
+int main() {
+    int cfg = gpioCfgGetInternals();
+    cfg |= PI_CFG_NOSIGHANDLER;
+    gpioCfgSetInternals(cfg);
+    signal(SIGINT, stopProgram);
+
+    if (gpioInitialise() < 0) {
+        cerr << "Misslyckades med att starta pigpio." << endl;
+        return -1;
+    }
+
+    gpioSetMode(MOTOR_HIGH, PI_OUTPUT);
+    gpioSetMode(MOTOR_LOW,  PI_OUTPUT);
+    gpioSetMode(MOTOR_PWM,  PI_OUTPUT);
+    gpioSetMode(SERVO_PWM,  PI_OUTPUT);
+
+    gpioWrite(MOTOR_HIGH, 0);
+    gpioWrite(MOTOR_LOW,  0);
+    gpioPWM(MOTOR_PWM, 0);
+    gpioServo(SERVO_PWM, 2150);
+
+    // ─────────────────────────────────────────────────────────────
+    // PARAMETRAR
+    // ─────────────────────────────────────────────────────────────
+    int    motorSpeed    = 100;   // sänkt från 110 för mer tid att svänga
+    double Kp            = 1.5;
+    double Ki            = 0.005;
+    int    startDelaySec = 3;
+    double smoothing     = 0.2;
+    int    minArea       = 100;
+    double maxAreaRatio  = 3.0;
+    // ─────────────────────────────────────────────────────────────
+
+    string pipeline = "libcamerasrc ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true sync=false";
+    VideoCapture cap(pipeline, CAP_GSTREAMER);
+
+    if (!cap.isOpened()) {
+        cerr << "Kunde inte oppna kameran!" << endl;
+        safeShutdown();
+        return -1;
+    }
+
+    // Videofil med tidsstämpel
+    time_t now_t = time(nullptr);
+    char timestr[64];
+    strftime(timestr, sizeof(timestr), "%Y%m%d_%H%M%S", localtime(&now_t));
+    string videoFile = "/home/hmm/conebot_run_" + string(timestr) + ".avi";
+
+    VideoWriter writer;
+    writer.open(videoFile,
+                VideoWriter::fourcc('M','J','P','G'),
+                20.0,
+                Size(640, 480));
+
+    if (!writer.isOpened()) {
+        cerr << "Kunde inte skapa videofil: " << videoFile << endl;
+        cap.release();
+        safeShutdown();
+        return -1;
+    }
+
+    cout << "Spelar in till: " << videoFile << endl;
+    cout << "Kp=" << Kp << " Ki=" << Ki
+         << " Smoothing=" << smoothing
+         << " Fart=" << motorSpeed << endl;
+    cout << "Startar om " << startDelaySec << " sekunder..." << endl;
+
+    Mat frame, hsv, maskBlue, maskYellow;
+    int    currentSteering  = 2150;
+    double smoothedSteering = 2150.0;
+    double integral         = 0.0;
+    auto   prevTime         = chrono::high_resolution_clock::now();
+    auto   startTime        = chrono::high_resolution_clock::now();
+    bool   motorStarted     = false;
+    int    frameCount       = 0;
+
+    while (keepRunning) {
+        cap >> frame;
+        if (frame.empty()) {
+            cout << "Tom frame, fortsatter..." << endl;
+            continue;
+        }
+
+        flip(frame, frame, -1);
+        frameCount++;
+
+        cvtColor(frame, hsv, COLOR_BGR2HSV);
+
+        inRange(hsv, Scalar(109, 129, 23),  Scalar(130, 255, 255), maskBlue);
+        inRange(hsv, Scalar(17,  175, 142), Scalar(34,  255, 255), maskYellow);
+
+        vector<vector<Point>> contoursBlue, contoursYellow;
+        findContours(maskBlue,   contoursBlue,   RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(maskYellow, contoursYellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+
+        double maxAreaBlue = 0, maxAreaYellow = 0;
+        Rect bestBlue, bestYellow;
+
+        for (const auto& c : contoursBlue) {
+            double a = contourArea(c);
+            if (a > maxAreaBlue) {
+                maxAreaBlue = a;
+                bestBlue = boundingRect(c);
+            }
+        }
+        for (const auto& c : contoursYellow) {
+            double a = contourArea(c);
+            if (a > maxAreaYellow) {
+                maxAreaYellow = a;
+                bestYellow = boundingRect(c);
+            }
+        }
+
+        Mat display = frame.clone();
+        line(display, Point(320, 0), Point(320, 480), Scalar(255,255,255), 1);
+
+        for (const auto& c : contoursBlue)
+            if (contourArea(c) > 30)
+                rectangle(display, boundingRect(c), Scalar(150,80,0), 1);
+        for (const auto& c : contoursYellow)
+            if (contourArea(c) > 30)
+                rectangle(display, boundingRect(c), Scalar(0,100,150), 1);
+
+        if (maxAreaBlue > minArea) {
+            rectangle(display, bestBlue, Scalar(255,0,0), 3);
+            circle(display,
+                   Point(bestBlue.x + bestBlue.width/2,
+                         bestBlue.y + bestBlue.height/2),
+                   6, Scalar(255,0,0), -1);
+            putText(display, "BLA " + to_string((int)maxAreaBlue),
+                    Point(bestBlue.x, max(bestBlue.y-8, 15)),
+                    FONT_HERSHEY_SIMPLEX, 0.5, Scalar(255,0,0), 2);
+        }
+        if (maxAreaYellow > minArea) {
+            rectangle(display, bestYellow, Scalar(0,200,255), 3);
+            circle(display,
+                   Point(bestYellow.x + bestYellow.width/2,
+                         bestYellow.y + bestYellow.height/2),
+                   6, Scalar(0,200,255), -1);
+            putText(display, "GUL " + to_string((int)maxAreaYellow),
+                    Point(bestYellow.x, max(bestYellow.y-8, 15)),
+                    FONT_HERSHEY_SIMPLEX, 0.5, Scalar(0,200,255), 2);
+        }
+
+        if (maxAreaBlue > minArea && maxAreaYellow > minArea) {
+
+            double areaRatio = maxAreaBlue / maxAreaYellow;
+
+            if (areaRatio > maxAreaRatio || areaRatio < (1.0 / maxAreaRatio)) {
+                // Fel par - behåll styrning, nollställ integral
+                integral = 0.0;
+                prevTime = chrono::high_resolution_clock::now();
+                smoothedSteering = smoothing * smoothedSteering
+                                 + (1.0 - smoothing) * 2150.0;
+
+                putText(display, "FEL PAR ratio:" +
+                        to_string(areaRatio).substr(0,4),
+                        Point(10,30), FONT_HERSHEY_SIMPLEX,
+                        0.7, Scalar(0,100,255), 2);
+
+                cout << "FEL PAR ratio=" << areaRatio
+                     << " Bla:" << (int)maxAreaBlue
+                     << " Gul:" << (int)maxAreaYellow << endl;
+
+            } else {
+                // Rätt par - beräkna CTE och styr
+                double blueCX     = bestBlue.x   + bestBlue.width   / 2.0;
+                double yellowCX   = bestYellow.x + bestYellow.width / 2.0;
+                double lookAheadX = (blueCX + yellowCX) / 2.0;
+                double blueCY     = bestBlue.y   + bestBlue.height  / 2.0;
+                double yellowCY   = bestYellow.y + bestYellow.height / 2.0;
+                double lookAheadY = (blueCY + yellowCY) / 2.0;
+
+                double cte = 320.0 - lookAheadX;
+
+                auto now2 = chrono::high_resolution_clock::now();
+                double dt = chrono::duration<double>(now2 - prevTime).count();
+                prevTime = now2;
+
+                integral += cte * dt;
+                double output = (Kp * cte) + (Ki * integral);
+
+                currentSteering = 2150 - static_cast<int>(output);
+                currentSteering = max(1900, min(2400, currentSteering));
+
+                smoothedSteering = smoothing * smoothedSteering
+                                 + (1.0 - smoothing) * currentSteering;
+
+                line(display,
+                     Point((int)blueCX,  (int)blueCY),
+                     Point((int)yellowCX,(int)yellowCY),
+                     Scalar(0,255,0), 2);
+                circle(display,
+                       Point((int)lookAheadX,(int)lookAheadY),
+                       10, Scalar(0,255,0), -1);
+                line(display, Point(320,480),
+                     Point((int)lookAheadX,(int)lookAheadY),
+                     Scalar(0,255,0), 2);
+
+                putText(display, "CTE: " + to_string((int)cte),
+                        Point(10,30), FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0,255,0), 2);
+                putText(display, "PWM: " + to_string((int)smoothedSteering),
+                        Point(10,60), FONT_HERSHEY_SIMPLEX, 0.7, Scalar(0,255,0), 2);
+                putText(display, "Ratio: " + to_string(areaRatio).substr(0,4),
+                        Point(10,90), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(200,255,0), 1);
+
+                cout << "CTE: " << (int)cte
+                     << " | PWM: " << (int)smoothedSteering
+                     << " | Ratio: " << to_string(areaRatio).substr(0,4) << endl;
+            }
+
+        } else {
+            integral = 0.0;
+            prevTime = chrono::high_resolution_clock::now();
+            smoothedSteering = smoothing * smoothedSteering
+                             + (1.0 - smoothing) * 2150.0;
+
+            string missing = "";
+            if (maxAreaBlue   <= minArea) missing += "SAKNAR BLA  ";
+            if (maxAreaYellow <= minArea) missing += "SAKNAR GUL";
+            putText(display, missing,
+                    Point(10,30), FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0,0,255), 2);
+            putText(display, "Bla:" + to_string((int)maxAreaBlue) +
+                             " Gul:" + to_string((int)maxAreaYellow),
+                    Point(10,60), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0,100,255), 2);
+        }
+
+        // Styrindikator
+        int barCX = 320, barY = 455, barHW = 180;
+        rectangle(display, Point(barCX-barHW, barY-7),
+                            Point(barCX+barHW, barY+7), Scalar(50,50,50), -1);
+        line(display, Point(barCX, barY-11),
+             Point(barCX, barY+11), Scalar(255,255,255), 1);
+        int barOff = (int)(((smoothedSteering-2150)/250.0)*barHW);
+        rectangle(display, Point(barCX, barY-5),
+                            Point(barCX+barOff, barY+5),
+                            barOff > 0 ? Scalar(0,150,255) : Scalar(255,150,0), -1);
+
+        // Motorstatus
+        double elapsed = chrono::duration<double>(
+            chrono::high_resolution_clock::now() - startTime).count();
+
+        if (!motorStarted && elapsed >= startDelaySec) {
+            cout << ">>> MOTORN STARTAR <<<" << endl;
+            gpioWrite(MOTOR_HIGH, 1);
+            gpioWrite(MOTOR_LOW,  0);
+            gpioPWM(MOTOR_PWM, motorSpeed);
+            motorStarted = true;
+        }
+
+        if (!motorStarted) {
+            putText(display,
+                    "Start om: " + to_string(startDelaySec-(int)elapsed) + "s",
+                    Point(10,120), FONT_HERSHEY_SIMPLEX, 0.8, Scalar(0,255,255), 2);
+        } else {
+            putText(display, "MOTOR PA",
+                    Point(10,120), FONT_HERSHEY_SIMPLEX, 0.6, Scalar(0,255,0), 1);
+        }
+
+        gpioServo(SERVO_PWM, (int)smoothedSteering);
+
+        // Spara frame till video
+        if (writer.isOpened()) {
+            writer.write(display);
+        }
+    }
+
+    // ── SÄKER AVSTÄNGNING ────────────────────────────────────────
+    cout << "Stangar av motorer..." << endl;
+    safeShutdown();
+
+    cout << "Frigör kamera..." << endl;
+    cap.release();
+
+    cout << "Sparar video..." << endl;
+    if (writer.isOpened()) {
+        writer.release();
+    }
+
+    cout << "Klart. Video sparad: " << videoFile << endl;
+    cout << "Antal frames inspelade: " << frameCount << endl;
+    return 0;
+}
