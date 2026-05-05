@@ -1,3 +1,18 @@
+/*
+ * ConeBot huvudprogram
+ * MF133X KTH
+ *
+ * Syfte:
+ * Detekterar blå och gula koner i kamerabilden, beräknar Cross-Track Error (CTE)
+ * och styr fordonet med en PI-regulator.
+ *
+ * Huvuddelar:
+ * 1. Initiering av GPIO, kamera och videoinspelning
+ * 2. Färgfiltrering i HSV och kondetektion
+ * 3. Matchning av konpar och beräkning av målpunkten
+ * 4. PI-reglering och styrsignal till servot
+ * 5. FPS-begränsning, loggning och säker avstängning
+ */
 #include <opencv2/opencv.hpp>
 #include <pigpio.h>
 #include <chrono>
@@ -15,11 +30,12 @@ using namespace cv;
 
 volatile sig_atomic_t keepRunning = 1;
 
+// Hantera säker avstängning vid Ctrl+C
 void stopProgram(int signum) {
     cout << "\n[Ctrl+C] Avslutar..." << endl;
     keepRunning = 0;
 }
-
+// Stäng ner motor, servo och GPIO på ett säkert sätt
 void safeShutdown() {
     gpioWrite(MOTOR_HIGH, 0);
     gpioWrite(MOTOR_LOW,  0);
@@ -30,6 +46,7 @@ void safeShutdown() {
 }
 
 int main() {
+    // Initiera pigpio och koppla signalhantering
     int cfg = gpioCfgGetInternals();
     cfg |= PI_CFG_NOSIGHANDLER;
     gpioCfgSetInternals(cfg);
@@ -39,7 +56,7 @@ int main() {
         cerr << "Misslyckades med att starta pigpio." << endl;
         return -1;
     }
-
+    // Konfigurera GPIO för motor och servo
     gpioSetMode(MOTOR_HIGH, PI_OUTPUT);
     gpioSetMode(MOTOR_LOW,  PI_OUTPUT);
     gpioSetMode(MOTOR_PWM,  PI_OUTPUT);
@@ -63,7 +80,7 @@ int main() {
     double targetFPS     = 15.0;          // <-- byt till 10.0 eller 5.0 för nästa tester
     double targetFrameTime = 1.0 / targetFPS;
     // ─────────────────────────────────────────────────────────────
-
+    // Starta kamera via GStreamer
     string pipeline = "libcamerasrc ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true sync=false";
     VideoCapture cap(pipeline, CAP_GSTREAMER);
 
@@ -72,8 +89,7 @@ int main() {
         safeShutdown();
         return -1;
     }
-
-    // Videoinspelning
+    // Skapa videofil för loggning av testkörningen
     time_t now_t = time(nullptr);
     char timestr[64];
     strftime(timestr, sizeof(timestr), "%Y%m%d_%H%M%S", localtime(&now_t));
@@ -91,7 +107,7 @@ int main() {
         safeShutdown();
         return -1;
     }
-
+    
     cout << "=== CONEBOT V5 ===" << endl;
     cout << "Spelar in till: " << videoFile << endl;
     cout << "Kp=" << Kp << " Ki=" << Ki
@@ -99,7 +115,8 @@ int main() {
          << " Fart=" << motorSpeed
          << " FPS=" << targetFPS << endl;
     cout << "Startar om " << startDelaySec << " sekunder..." << endl;
-
+    
+    // Initiera variabler för styrning, tid och loggning
     Mat frame, hsv, maskBlue, maskYellow;
     int    currentSteering  = 2150;
     double smoothedSteering = 2150.0;
@@ -110,7 +127,7 @@ int main() {
     int    frameCount       = 0;
 
     while (keepRunning) {
-
+        // Läs in nästa bildruta och starta FPS-mätning
         // FPS-begränsning: starta tidtagning för denna frame
         auto fpsStart = chrono::high_resolution_clock::now();
 
@@ -119,12 +136,14 @@ int main() {
 
         flip(frame, frame, -1);
         frameCount++;
-
+        
+        // Konvertera bilden till HSV och skapa färgmasker
         cvtColor(frame, hsv, COLOR_BGR2HSV);
 
         inRange(hsv, Scalar(109, 129, 23),  Scalar(130, 255, 255), maskBlue);
         inRange(hsv, Scalar(17,  175, 142), Scalar(34,  255, 255), maskYellow);
-
+       
+        // Hitta konturer för blå och gula koner
         vector<vector<Point>> contoursBlue, contoursYellow;
         findContours(maskBlue,   contoursBlue,   RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
         findContours(maskYellow, contoursYellow, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
