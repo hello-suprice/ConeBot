@@ -13,29 +13,33 @@
  * 4. PI-reglering och styrsignal till servot
  * 5. FPS-begränsning, loggning och säker avstängning
  */
+// Biblotek:
 #include <opencv2/opencv.hpp>
 #include <pigpio.h>
-#include <chrono>
-#include <iostream>
-#include <csignal>
-#include <ctime>
+#include <chrono>                // tidmätning mellan två bildrutor
+#include <iostream>              // skriva text i terminalen
+#include <csignal>               // signalhantering som Ctrl+C 
+#include <ctime>                 // datum och tid för unikt filnamn för videon
 
+// Undvika skriva långa prefix:
 using namespace std;
 using namespace cv;
+
 
 #define MOTOR_PWM  18
 #define MOTOR_HIGH 14
 #define MOTOR_LOW  15
 #define SERVO_PWM  13
 
-volatile sig_atomic_t keepRunning = 1;
+volatile sig_atomic_t keepRunning = 1;       //global körflagga
 
-// Hantera säker avstängning vid Ctrl+C
+// Hantera säker avstängning vid Ctrl+C, stängs ej abrupt
 void stopProgram(int signum) {
     cout << "\n[Ctrl+C] Avslutar..." << endl;
     keepRunning = 0;
 }
-// Stäng ner motor, servo och GPIO på ett säkert sätt
+// Stäng ner motor, servo och GPIO på ett säkert sätt så att bilen inte blir kvar med 
+// aktiv motorsignal om programmet avslutas
 void safeShutdown() {
     gpioWrite(MOTOR_HIGH, 0);
     gpioWrite(MOTOR_LOW,  0);
@@ -46,7 +50,9 @@ void safeShutdown() {
 }
 
 int main() {
-    // Initiera pigpio och koppla signalhantering
+    // Här konfigurerar jag pigpio så att mitt program själv får hantera Ctrl+C. 
+    // Det är viktigt eftersom jag vill kunna stänga av motorer och servon säkert 
+    // innan programmet avslutas.
     int cfg = gpioCfgGetInternals();
     cfg |= PI_CFG_NOSIGHANDLER;
     gpioCfgSetInternals(cfg);
@@ -56,16 +62,17 @@ int main() {
         cerr << "Misslyckades med att starta pigpio." << endl;
         return -1;
     }
-    // Konfigurera GPIO för motor och servo
+    // Konfigurera GPIO för motor och servo som utgångar
     gpioSetMode(MOTOR_HIGH, PI_OUTPUT);
     gpioSetMode(MOTOR_LOW,  PI_OUTPUT);
     gpioSetMode(MOTOR_PWM,  PI_OUTPUT);
     gpioSetMode(SERVO_PWM,  PI_OUTPUT);
 
-    gpioWrite(MOTOR_HIGH, 0);
-    gpioWrite(MOTOR_LOW,  0);
-    gpioPWM(MOTOR_PWM, 0);
+    gpioWrite(MOTOR_HIGH, 0);                     // Innan bilen börjar köra sätts alla styrsignaler 
+    gpioWrite(MOTOR_LOW,  0);                     // till ett säkert startläge. Det hindrar bilen från 
+    gpioPWM(MOTOR_PWM, 0);                        // att rycka igång direkt när programmet startar.
     gpioServo(SERVO_PWM, 2150);
+
 
     // ─────────────────────────────────────────────────────────────
     // PARAMETRAR
@@ -76,10 +83,12 @@ int main() {
     int    startDelaySec = 3;
     double smoothing     = 0.35;
     int    minArea       = 50;
-    double maxAreaRatio  = 3.0;
+    double maxAreaRatio  = 2.5;
     double targetFPS     = 15.0;          // <-- byt till 10.0 eller 5.0 för nästa tester
     double targetFrameTime = 1.0 / targetFPS;
     // ─────────────────────────────────────────────────────────────
+    
+    
     // Starta kamera via GStreamer
     string pipeline = "libcamerasrc ! video/x-raw,width=640,height=480,framerate=30/1 ! videoconvert ! video/x-raw,format=BGR ! appsink drop=true sync=false";
     VideoCapture cap(pipeline, CAP_GSTREAMER);
